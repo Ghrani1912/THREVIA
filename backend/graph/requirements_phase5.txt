@@ -1,0 +1,14 @@
+# Phase 5 — Graph Analysis dependencies
+# Install with: pip install -r requirements_phase5.txt
+
+# Graph construction and algorithms
+networkx==3.3
+
+# Louvain community detection
+python-louvain==0.16
+
+# Graph visualization (PyVis generates self-contained HTML)
+pyvis==0.3.2
+
+# MongoDB client (shared with Phase 4)
+pymongo==4.7.2

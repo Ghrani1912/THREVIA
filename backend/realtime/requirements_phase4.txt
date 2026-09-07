@@ -1,0 +1,14 @@
+# Phase 4 — Real-Time Layer dependencies
+# Install with: pip install -r requirements_phase4.txt
+
+# Bloom Filter
+pybloom-live==4.0.0
+
+# Stream processing
+pyspark==3.5.1
+
+# MongoDB client
+pymongo==4.7.2
+
+# Standard library deps (already included in Python 3.x, listed for clarity)
+# csv, json, socket, pickle, logging, threading, time, pathlib — all stdlib

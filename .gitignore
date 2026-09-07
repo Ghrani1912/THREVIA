@@ -1,0 +1,117 @@
+# ─────────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─────────────────────────────────────────────────────────────
+# Virtual environments
+# ─────────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# ─────────────────────────────────────────────────────────────
+# Environment / secrets
+# ─────────────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+hadoop.env
+
+# ─────────────────────────────────────────────────────────────
+# Datasets  (large files — download separately, never commit)
+# ─────────────────────────────────────────────────────────────
+# CIC-IDS-2017
+backend/data/CIC-IDS-*/
+backend/data/CIC-IDS- */
+
+# CICIDS2018
+backend/data/CICIDS2018/
+
+# LycoS
+backend/data/LYCSOS/
+
+# UNSW-NB15
+backend/data/UNSW-NB15/
+
+# IDS2025
+backend/data/IDS2025*/
+backend/data/ids2025_clean/
+
+# PortScan clean splits
+backend/data/portscan_clean/
+
+# Generic data file extensions anywhere under backend/data
+backend/data/**/*.csv
+backend/data/**/*.parquet
+backend/data/**/*.json
+backend/data/**/*.xlsx
+backend/data/**/*.pdf
+backend/data/**/*.txt
+
+# ─────────────────────────────────────────────────────────────
+# Generated / runtime artefacts
+# ─────────────────────────────────────────────────────────────
+# Bloom Filter pickle (rebuilt by run_phase4.py bloom)
+backend/realtime/bloom_filter.pkl
+
+# PyVis graph export (rebuilt by run_phase5.py)
+backend/graph/graph_export.html
+
+# PyVis vendor libs dumped to workspace root by pyvis
+lib/
+
+# Spark / Hadoop outputs
+backend/spark-warehouse/
+backend/output/
+spark-warehouse/
+*.out
+derby.log
+
+# Streamlit cache
+dashboard/.streamlit/
+
+# ─────────────────────────────────────────────────────────────
+# Jupyter
+# ─────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─────────────────────────────────────────────────────────────
+# Docker
+# ─────────────────────────────────────────────────────────────
+docker/volumes/
+
+# ─────────────────────────────────────────────────────────────
+# OS
+# ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────────────────────
+# IDE
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.freebuff/
+
+# ─────────────────────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────────────────────
+*.log
+logs/

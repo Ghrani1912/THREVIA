@@ -1,0 +1,182 @@
+services:
+
+  # ─────────────────────────────────────────
+  # HADOOP — NameNode (master)
+  # ─────────────────────────────────────────
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: threvia-namenode
+    restart: unless-stopped
+    ports:
+      - "9870:9870"   # HDFS Web UI
+      - "8020:8020"   # HDFS RPC
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+      - ./backend:/workspace/backend
+    environment:
+      - CLUSTER_NAME=threvia
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - threvia-net
+
+  # ─────────────────────────────────────────
+  # HADOOP — DataNode (worker)
+  # ─────────────────────────────────────────
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: threvia-datanode
+    restart: unless-stopped
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - threvia-net
+
+  # ─────────────────────────────────────────
+  # SPARK — Master
+  # ─────────────────────────────────────────
+  spark-master:
+    image: apache/spark:latest
+    container_name: threvia-spark-master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./backend:/workspace/backend
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    networks:
+      - threvia-net
+
+  # ─────────────────────────────────────────
+  # SPARK — Worker
+  # ─────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:latest
+    container_name: threvia-spark-worker
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=3g
+      - SPARK_WORKER_CORES=2
+    volumes:
+      - ./backend:/workspace/backend
+      - spark_tmp:/tmp/spark
+    depends_on:
+      - spark-master
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    networks:
+      - threvia-net
+
+  # ─────────────────────────────────────────
+  # PHASE 4 — Stream Simulator
+  # Replays UNSW-NB15 rows as JSON lines over TCP port 9999.
+  # Start this before the streaming-detector.
+  # ─────────────────────────────────────────
+  stream-simulator:
+    image: python:3.11-slim
+    container_name: threvia-stream-simulator
+    restart: "no"
+    working_dir: /workspace
+    volumes:
+      - ./backend:/workspace/backend
+    environment:
+      - STREAM_HOST=0.0.0.0
+      - STREAM_PORT=9999
+      - STREAM_RPS=200          # rows per second
+      - STREAM_LOOP=1           # 1 = loop dataset forever
+      - PYTHONPATH=/workspace
+    ports:
+      - "9999:9999"
+    command: >
+      sh -c "pip install pybloom-live==4.0.0 --quiet &&
+             python backend/realtime/stream_simulator.py"
+    networks:
+      - threvia-net
+    profiles:
+      - phase4
+
+  # ─────────────────────────────────────────
+  # PHASE 4 — Streaming Detector
+  # Bloom Filter + Spark windowed spike detection.
+  # Reads from stream-simulator:9999, writes alerts to MongoDB.
+  # ─────────────────────────────────────────
+  streaming-detector:
+    image: apache/spark:latest
+    container_name: threvia-streaming-detector
+    restart: "no"
+    working_dir: /workspace
+    volumes:
+      - ./backend:/workspace/backend
+    environment:
+      - STREAM_HOST=stream-simulator
+      - STREAM_PORT=9999
+      - SPARK_MASTER=local[2]
+      - SPIKE_THRESHOLD=50
+      - WINDOW_SECONDS=60
+      - MONGO_URI=mongodb://mongodb:27017/
+      - MONGO_DB=threvia
+      - PYTHONPATH=/workspace
+    depends_on:
+      - stream-simulator
+      - mongodb
+    command: >
+      bash -c "pip install pybloom-live==4.0.0 pymongo==4.7.2 pyspark==3.5.1 --quiet &&
+               python backend/realtime/streaming_detector.py"
+    networks:
+      - threvia-net
+    profiles:
+      - phase4
+
+  # ─────────────────────────────────────────
+  # MONGODB — Processed events store
+  # ─────────────────────────────────────────
+  mongodb:
+    image: mongo:6
+    container_name: threvia-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: threvia
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - threvia-net
+
+# ─────────────────────────────────────────
+# VOLUMES
+# ─────────────────────────────────────────
+volumes:
+  namenode_data:
+  datanode_data:
+  mongo_data:
+  spark_tmp:
+
+# ─────────────────────────────────────────
+# NETWORK
+# ─────────────────────────────────────────
+networks:
+  threvia-net:
+    driver: bridge
