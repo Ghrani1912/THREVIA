@@ -135,13 +135,22 @@ document.addEventListener('DOMContentLoaded', function() {
 window.THREVIA = {
     updateMetrics,
     updateThreatStream,
-    API_BASE
+    API_BASE,
+    setRadarPaused,
+    isRadarPaused: () => radarPaused
 };
 
 
 // Radar visualization with top 8 threat IPs
 let radarIPs = [];
 let radarAngle = 0;
+// Shared with the topology view: [SPACE] freezes both the sweep and the graph.
+let radarPaused = false;
+
+function setRadarPaused(paused) {
+    radarPaused = !!paused;
+    return radarPaused;
+}
 
 async function updateRadarIPs() {
     try {
@@ -192,7 +201,7 @@ function drawRadar() {
     ctx.stroke();
     
     // Draw sweep line
-    radarAngle = (radarAngle + 2) % 360;
+    if (!radarPaused) radarAngle = (radarAngle + 2) % 360;
     const sweepRad = (radarAngle * Math.PI) / 180;
     const gradient = ctx.createLinearGradient(
         centerX, centerY,

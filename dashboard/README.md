@@ -22,6 +22,32 @@ A military-grade, real-time cybersecurity intelligence dashboard featuring polar
 - Graph analytics integration (PageRank, degree, community)
 - Bloom Filter hit verification
 
+### 🕸 Network Topology (Phase 5)
+
+Click **[NETWORK TOPOLOGY]** in the view tabs to open the link-analysis workspace.
+
+It deliberately does **not** render "the top 100 nodes by danger score". Cutting
+the graph by score severs exactly the edges that make a campaign visible — you
+end up with 100 disconnected red dots instead of 3 attack clusters. Selection is
+structural instead:
+
+| Level | What is drawn |
+|-------|---------------|
+| **0 — default** | Malicious communities (`graph_communities.is_malicious`, top-K by severity) *fully intact* ∪ every `is_attacker` node ∪ every node **directly connected** to an attacker. Normal traffic with no attacker path is not shipped to the browser at all. |
+| **1 — on click / search** | Click any node to unfold its neighbourhood even outside the flagged set ("who else is this attacker talking to?"). Searching an IP pulls that node + its 1-hop ego-network in regardless of attacker status. |
+| **2 — explicit** | `[SHOW FULL GRAPH]` renders a sampled, dimmed, structure-only macro view. It is labeled as sampled because it is meant for pattern-spotting, never node-by-node reading. |
+
+Scale *inside* a view:
+
+- **`+N PEERS` aggregate** — a cluster with more than ~40 members collapses its unflagged bulk into one hexagon that expands on click (confirmed attackers always stay as individual nodes).
+- **Edge lens** — defaults to `has_attack = true` edges only; `[EDGES: ALL TRAFFIC]` reveals the rest. Suppressed edges are counted in the coverage readout rather than silently dropped.
+- **Label budget tied to what is rendered** — a small cluster labels everything; a crowded one labels attackers, collapsed buckets, and the highest-percentile nodes only. Labels are drawn at constant screen size and dodge each other, so they stay readable at any zoom.
+- **Honest coverage** — the canvas always reports `N / M NODES IN VIEW`, `N OMITTED (NO ATTACKER PATH)`, and how many edges the lens is hiding.
+
+Controls: zoom / `[FIT]`, `[PAN]`, `[FREEZE]`, severity lens `[ALL][CRIT][WARN][CLEAN]`
+(CRIT = confirmed attacker, WARN = flagged-cluster peer, CLEAN = benign 1-hop),
+`[CLUSTERS: TOP K]`, `[DETAIL: AUTO-COLLAPSE]`, `[LAYOUT: FORCE-DIRECTED|RADIAL FAN]`.
+
 ### 🔬 Honest ML Evaluation
 - **NO GREENWASHING**: Shows actual model performance
 - DDoS: 99.8% ✅ (Optimal)
@@ -44,8 +70,8 @@ A military-grade, real-time cybersecurity intelligence dashboard featuring polar
 Frontend (HTML/JS)          Backend (FastAPI)        Data Layer
 ┌─────────────────┐         ┌─────────────────┐     ┌──────────────┐
 │  index.html     │ ◄─HTTP─►│   main.py       │     │  MongoDB     │
-│  app.js         │         │                 │ ◄───┤              │
-│  (Radar Canvas) │ ◄─WS──►│   /api/v1/...   │     │  HDFS        │
+│  app.js (radar) │         │   graph_query.py│ ◄───┤ graph_nodes  │
+│  graph.js (topo)│ ◄─WS──►│   /api/v1/...   │     │  HDFS        │
 └─────────────────┘         └─────────────────┘     └──────────────┘
 ```
 
@@ -58,7 +84,10 @@ Frontend (HTML/JS)          Backend (FastAPI)        Data Layer
 | `/api/v1/threats/recent` | GET | Recent threat events |
 | `/api/v1/threats/live` | WebSocket | Real-time threat stream |
 | `/api/v1/ip/{ip}/reputation` | GET | IP reputation + Bloom Filter |
+| `/api/v1/graph/view?scope=threat\|full&k=N` | GET | Attacker-centred subgraph for the topology view |
+| `/api/v1/graph/ego/{ip}` | GET | One node + its 1-hop neighbourhood (Level 1 expansion) |
 | `/api/v1/graph/node/{ip}` | GET | Graph analytics for IP |
+| `/api/v1/graph/communities` | GET | All Louvain communities with members + stats |
 | `/api/v1/model/performance` | GET | Model evaluation metrics |
 
 ---
@@ -125,9 +154,34 @@ $env:MONGO_URI = "mongodb://your-server:27017/"
 
 | Key | Action |
 |-----|--------|
-| `[SPACE]` | Freeze/Resume radar sweep |
+| `[1]` `[2]` `[3]` | Switch view (Radar / Topology / Spectral) |
+| `[SPACE]` | Freeze/Resume the radar sweep **and** the topology layout |
 | `[/]` | Focus search filter |
-| `[ESC]` | Clear filter / Close drawer |
+| `[F]` | Fit the topology view to the canvas |
+| `[ESC]` | Clear filter / close drawer / clear node selection |
+
+### Topology mouse controls
+
+| Action | Result |
+|--------|--------|
+| Click a node | Select it and **unfold its neighbourhood** (Level 1) |
+| Click a `+N PEERS` hexagon | Expand the collapsed peers |
+| Drag a node | Pin it where you drop it while the solver runs |
+| Drag the background | Pan (when `[PAN: ON]`) |
+| Scroll | Zoom toward the cursor |
+
+### Topology data source
+
+`dashboard/graph.js` reads `GET /api/v1/graph/view`, which is served by
+`backend/graph/graph_query.py`. That layer reads MongoDB
+(`graph_nodes` / `graph_edges` / `graph_communities`) and falls back to
+`backend/graph/graph_export.json` if Mongo is empty, so the view still renders
+offline. If neither exists, the canvas shows an explicit error instead of fake
+data:
+
+```powershell
+python backend/graph/run_phase5.py all   # build graph + analytics + exports
+```
 
 ---
 
@@ -346,6 +400,6 @@ export API_BASE_URL="https://threvia.your-domain.com"
 
 ---
 
-**Last Updated:** September 12, 2026  
-**Version:** 1.0.0 (Production)  
+**Last Updated:** September 16, 2026  
+**Version:** 1.1.0 (Phase 5 topology view)  
 **Contact:** See main project README

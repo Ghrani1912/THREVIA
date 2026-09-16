@@ -168,30 +168,42 @@ class GraphWriter:
         
         logger.info("Exporting graph as JSON to %s …", output_path)
         
-        # Get analytics from results
-        pr = results.get("pagerank", {})
-        danger = results.get("danger_scores", {})
-        communities = results.get("communities", {})
-        
-        # Build community maliciousness lookup
-        comm_mal = {}
-        for comm_id, members in communities.items():
-            has_attacker = any(
-                G.nodes[ip].get("is_attacker", False) 
-                for ip in members if ip in G.nodes
+        # Get analytics from results. run_analytics() returns everything under
+        # "centrality_scores"; danger scores are re-derived here with the same
+        # formula so the export matches the Mongo documents / API payloads.
+        scores = results.get("centrality_scores", {}) or {}
+        communities = results.get("communities", {}) or {}
+        community_stats = results.get("community_stats", []) or []
+
+        n_nodes = max(G.number_of_nodes(), 1)
+
+        def danger_score(score: dict) -> float:
+            return round(
+                (score.get("pagerank", 0.0) * 0.5)
+                + (score.get("out_degree", 0.0) * 0.3)
+                + (score.get("degree", 0.0) * 0.2),
+                8,
             )
-            comm_mal[comm_id] = has_attacker
+
+        # Build community lookups once (membership + maliciousness)
+        comm_of: dict[str, int] = {}
+        for comm_id, members in communities.items():
+            for ip in members:
+                comm_of[ip] = comm_id
+        comm_mal = {c["community_id"]: c["is_malicious"] for c in community_stats}
         
         # Export nodes
         nodes = []
         for node, data in G.nodes(data=True):
             is_attacker = data.get("is_attacker", False)
-            comm_id = next((cid for cid, members in communities.items() if node in members), None)
+            comm_id = comm_of.get(node)
+            score = scores.get(node, {})
+            pr = score.get("pagerank", 0.0)
             
             # Determine color based on attacker status and community
             if is_attacker:
                 color = "#ff3344"  # Red - confirmed attacker
-            elif comm_id and comm_mal.get(comm_id):
+            elif comm_id is not None and comm_mal.get(comm_id):
                 color = "#ffaa00"  # Orange - malicious community
             else:
                 color = "#00d9ff"  # Blue - normal
@@ -199,16 +211,16 @@ class GraphWriter:
             nodes.append({
                 "id": node,
                 "label": node,
-                "pagerank": pr.get(node, 0),
-                "danger_score": danger.get(node, 0),
+                "pagerank": pr,
+                "danger_score": danger_score(score),
                 "is_attacker": is_attacker,
-                "community_id": comm_id,
+                "community_id": comm_id if comm_id is not None else -1,
                 "attack_cats": data.get("attack_cats", []),
                 "total_flows": data.get("total_flows", 0),
                 "out_degree": G.out_degree(node),
                 "in_degree": G.in_degree(node),
                 "color": color,
-                "size": max(10, min(60, pr.get(node, 0) * 1000)),  # Scale by PageRank
+                "size": max(10, min(60, pr * 1000)),  # Scale by PageRank
             })
         
         # Export edges
@@ -226,16 +238,30 @@ class GraphWriter:
                 "width": max(1, min(5, data.get("weight", 1) / 10)),  # Scale by weight
             })
         
+        # Community payload — lets the dashboard build the attacker-centred
+        # default view (malicious clusters + their members) without a second call.
+        comm_payload = []
+        for c in community_stats:
+            comm_payload.append({
+                **c,
+                "members": communities.get(c["community_id"], []),
+            })
+        
         # Bundle with metadata
         graph_json = {
             "nodes": nodes,
             "edges": edges,
+            "communities": comm_payload,
             "metadata": {
                 "total_nodes": G.number_of_nodes(),
                 "total_edges": G.number_of_edges(),
                 "attacker_nodes": len([n for n in nodes if n["is_attacker"]]),
                 "attack_edges": len([e for e in edges if e["has_attack"]]),
                 "communities": len(communities),
+                "malicious_communities": sum(1 for c in community_stats if c["is_malicious"]),
+                "modularity": results.get("modularity"),
+                "top_n": len(results.get("top_nodes", [])),
+                "danger_formula": "0.5*pagerank + 0.3*out_degree_centrality + 0.2*degree_centrality",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
         }

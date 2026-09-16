@@ -113,14 +113,14 @@ def build_graph(max_rows: Optional[int] = None) -> nx.DiGraph:
 
     for fpath in _csv_files():
         logger.info("  Reading %s …", fpath.name)
-        with open(fpath, newline="", encoding="utf-8", errors="replace") as f:
+        with open(fpath, newline="", encoding="utf-8-sig", errors="replace") as f:
             reader = csv.reader(f)
             for row in reader:
                 if len(row) <= _COL_LABEL:
                     continue
 
-                src  = row[_COL_SRCIP].strip()
-                dst  = row[_COL_DSTIP].strip()
+                src  = row[_COL_SRCIP].strip().lstrip("\ufeff")
+                dst  = row[_COL_DSTIP].strip().lstrip("\ufeff")
                 proto = row[_COL_PROTO].strip().lower()
                 label = row[_COL_LABEL].strip()
                 cat   = row[_COL_ATTACK_CAT].strip()

@@ -12,6 +12,24 @@ from typing import List, Dict, Any
 import asyncio
 import os
 from datetime import datetime, timezone
+import sys
+
+# Ensure the project root is importable when this file is launched directly
+# (`python backend/api/main.py` puts backend/api on sys.path, not the root).
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+# Phase 5 graph views. graph_query only needs the stdlib, so this is safe in the
+# API venv; a failure degrades to an explicit error instead of killing the app.
+try:
+    from backend.graph.graph_query import load_ego, load_view
+except ImportError as _exc:  # pragma: no cover - defensive
+    load_ego = None
+    load_view = None
+    _GRAPH_QUERY_ERROR = str(_exc)
+else:
+    _GRAPH_QUERY_ERROR = None
 
 app = FastAPI(title="THREVIA API", version="1.0.0")
 
@@ -559,3 +577,58 @@ async def get_communities():
         return {"communities": communities, "count": len(communities)}
     except Exception as e:
         return {"error": str(e), "communities": []}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 5 — ATTACKER-CENTRED TOPOLOGY VIEWS
+# ─────────────────────────────────────────────────────────────────────────────
+# /api/v1/graph/view supersedes /api/v1/graph/topology for the dashboard. It
+# returns a targeted *subgraph* rather than the whole graph:
+#
+#   scope=threat (default) : malicious communities (top k) ∪ attackers
+#                            ∪ every node directly connected to an attacker
+#   scope=full             : sampled macro view (structure-spotting only)
+#
+# Ranked nodes by danger score alone would sever exactly the edges that make a
+# campaign visible, so selection is structural, never score-thresholded.
+
+def _graph_unavailable():
+    return {
+        "error": _GRAPH_QUERY_ERROR or "graph query layer unavailable",
+        "nodes": [],
+        "edges": [],
+        "communities": [],
+        "metadata": {},
+    }
+
+
+@app.get("/api/v1/graph/view")
+async def get_graph_view(scope: str = "threat", k: int = 3, max_nodes: int = 0):
+    """
+    View-ready subgraph for the SOC topology workspace.
+
+    scope=threat  Level 0 — top-k malicious clusters, fully intact
+    scope=full    Level 2 — sampled macro view of the entire graph
+    k             number of malicious communities to expand (<=0 → all)
+    """
+    if load_view is None:
+        return _graph_unavailable()
+    try:
+        return load_view(db, scope=scope, k=k, max_nodes=max_nodes or None)
+    except Exception as e:
+        return {"error": str(e), "nodes": [], "edges": [], "communities": [], "metadata": {}}
+
+
+@app.get("/api/v1/graph/ego/{ip_address}")
+async def get_graph_ego(ip_address: str, limit: int = 200):
+    """
+    Level 1 expansion — one node plus its 1-hop neighbourhood, whether or not
+    any of it sits inside a flagged community. This answers the actual
+    investigative question: "who else is this attacker talking to?"
+    """
+    if load_ego is None:
+        return _graph_unavailable()
+    try:
+        return load_ego(ip_address, db, limit=limit)
+    except Exception as e:
+        return {"error": str(e), "nodes": [], "edges": [], "communities": [], "metadata": {}}
