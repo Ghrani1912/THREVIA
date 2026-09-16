@@ -145,6 +145,109 @@ class GraphWriter:
 
     # ── PyVis HTML Export ──────────────────────────────────────────────────────
 
+    def export_json(
+        self,
+        G: nx.DiGraph,
+        results: dict,
+        output_path: str | Path = None,
+    ) -> Path:
+        """
+        Export graph as JSON for frontend consumption (vis-network, Cytoscape, etc.).
+        
+        Returns a JSON file with nodes and edges arrays that can be directly
+        consumed by JavaScript visualization libraries without PyVis overhead.
+        
+        Includes all analytics results: PageRank, danger scores, communities, etc.
+        """
+        import json
+        
+        if output_path is None:
+            output_path = Path(__file__).parent / "graph_export.json"
+        else:
+            output_path = Path(output_path)
+        
+        logger.info("Exporting graph as JSON to %s …", output_path)
+        
+        # Get analytics from results
+        pr = results.get("pagerank", {})
+        danger = results.get("danger_scores", {})
+        communities = results.get("communities", {})
+        
+        # Build community maliciousness lookup
+        comm_mal = {}
+        for comm_id, members in communities.items():
+            has_attacker = any(
+                G.nodes[ip].get("is_attacker", False) 
+                for ip in members if ip in G.nodes
+            )
+            comm_mal[comm_id] = has_attacker
+        
+        # Export nodes
+        nodes = []
+        for node, data in G.nodes(data=True):
+            is_attacker = data.get("is_attacker", False)
+            comm_id = next((cid for cid, members in communities.items() if node in members), None)
+            
+            # Determine color based on attacker status and community
+            if is_attacker:
+                color = "#ff3344"  # Red - confirmed attacker
+            elif comm_id and comm_mal.get(comm_id):
+                color = "#ffaa00"  # Orange - malicious community
+            else:
+                color = "#00d9ff"  # Blue - normal
+            
+            nodes.append({
+                "id": node,
+                "label": node,
+                "pagerank": pr.get(node, 0),
+                "danger_score": danger.get(node, 0),
+                "is_attacker": is_attacker,
+                "community_id": comm_id,
+                "attack_cats": data.get("attack_cats", []),
+                "total_flows": data.get("total_flows", 0),
+                "out_degree": G.out_degree(node),
+                "in_degree": G.in_degree(node),
+                "color": color,
+                "size": max(10, min(60, pr.get(node, 0) * 1000)),  # Scale by PageRank
+            })
+        
+        # Export edges
+        edges = []
+        for src, dst, data in G.edges(data=True):
+            edges.append({
+                "source": src,
+                "target": dst,
+                "weight": data.get("weight", 1),
+                "has_attack": data.get("has_attack", False),
+                "attack_cats": data.get("attack_cats", []),
+                "total_bytes": data.get("total_bytes", 0),
+                "proto_counts": data.get("proto_counts", {}),
+                "color": "#ff4757" if data.get("has_attack") else "#00d9ff",
+                "width": max(1, min(5, data.get("weight", 1) / 10)),  # Scale by weight
+            })
+        
+        # Bundle with metadata
+        graph_json = {
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": {
+                "total_nodes": G.number_of_nodes(),
+                "total_edges": G.number_of_edges(),
+                "attacker_nodes": len([n for n in nodes if n["is_attacker"]]),
+                "attack_edges": len([e for e in edges if e["has_attack"]]),
+                "communities": len(communities),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+        
+        # Write JSON
+        with open(output_path, 'w') as f:
+            json.dump(graph_json, f, indent=2)
+        
+        logger.info("JSON graph exported: %s (%d nodes, %d edges)",
+                   output_path, len(nodes), len(edges))
+        return output_path
+
     def export_pyvis(
         self,
         G: nx.DiGraph,

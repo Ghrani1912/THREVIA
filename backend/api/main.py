@@ -494,3 +494,68 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GRAPH API ENDPOINTS (Phase 5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/graph/topology")
+async def get_graph_topology():
+    """
+    Get network topology graph data for visualization.
+    Returns nodes and edges with analytics (PageRank, danger scores, communities).
+    """
+    try:
+        # Try to load from JSON export first (fastest)
+        import json
+        from pathlib import Path
+        
+        json_path = Path(__file__).parent.parent / "graph" / "graph_export.json"
+        if json_path.exists():
+            with open(json_path, 'r') as f:
+                return json.load(f)
+        
+        # Fallback: build from MongoDB collections
+        nodes = list(db.graph_nodes.find({}, {"_id": 0}).limit(1000))
+        edges = list(db.graph_edges.find({}, {"_id": 0}).limit(5000))
+        meta = db.graph_meta.find_one({}, {"_id": 0}) or {}
+        
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": meta
+        }
+    except Exception as e:
+        return {"error": str(e), "nodes": [], "edges": [], "metadata": {}}
+
+@app.get("/api/v1/graph/node/{ip_address}")
+async def get_node_details(ip_address: str):
+    """Get detailed information about a specific node in the graph."""
+    try:
+        node = db.graph_nodes.find_one({"ip": ip_address}, {"_id": 0})
+        if not node:
+            return {"error": "Node not found"}
+        
+        # Get edges connected to this node
+        outgoing = list(db.graph_edges.find({"src": ip_address}, {"_id": 0}).limit(50))
+        incoming = list(db.graph_edges.find({"dst": ip_address}, {"_id": 0}).limit(50))
+        
+        return {
+            "node": node,
+            "outgoing_edges": outgoing,
+            "incoming_edges": incoming,
+            "out_degree": len(outgoing),
+            "in_degree": len(incoming)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/v1/graph/communities")
+async def get_communities():
+    """Get all detected communities with their members and characteristics."""
+    try:
+        communities = list(db.graph_communities.find({}, {"_id": 0}))
+        return {"communities": communities, "count": len(communities)}
+    except Exception as e:
+        return {"error": str(e), "communities": []}

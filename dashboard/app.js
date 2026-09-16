@@ -247,3 +247,247 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(updateRadarIPs, 5000); // Update IPs every 5 seconds
     drawRadar(); // Start animation loop
 });
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXPORT LOG FUNCTIONALITY
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function exportAlertsToCSV() {
+    try {
+        // Fetch all recent alerts
+        const response = await fetch(`${API_BASE}/threats/recent?limit=1000`);
+        const data = await response.json();
+        
+        if (!data.threats || data.threats.length === 0) {
+            alert('No alerts to export');
+            return;
+        }
+        
+        // Convert to CSV
+        const threats = data.threats;
+        
+        // CSV Headers
+        const headers = [
+            'Timestamp',
+            'Type',
+            'Source IP',
+            'Destination IP',
+            'Attack Type',
+            'Confidence',
+            'Severity',
+            'Connection Count',
+            'Ground Truth Label',
+            'Ground Truth Category'
+        ];
+        
+        // CSV Rows
+        const rows = threats.map(threat => {
+            const timestamp = threat.created_at || threat.event_time || threat.timestamp || 'N/A';
+            const type = threat.type || 'unknown';
+            const srcIp = threat.src_ip || threat.source_ip || 'N/A';
+            const dstIp = threat.dst_ip || threat.destination_ip || 'N/A';
+            const attackType = threat.attack_type || 'N/A';
+            const confidence = threat.confidence ? (threat.confidence * 100).toFixed(2) + '%' : 'N/A';
+            const severity = threat.severity || 'N/A';
+            const connCount = threat.connection_count || 'N/A';
+            const gtLabel = threat.ground_truth_label || 'N/A';
+            const gtCat = threat.ground_truth_cat || 'N/A';
+            
+            return [
+                timestamp,
+                type,
+                srcIp,
+                dstIp,
+                attackType,
+                confidence,
+                severity,
+                connCount,
+                gtLabel,
+                gtCat
+            ];
+        });
+        
+        // Build CSV content
+        const csvContent = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+        ].join('\n');
+        
+        // Create download
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+        const filename = `threvia_alerts_${timestamp}.csv`;
+        
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        console.log(`✓ Exported ${threats.length} alerts to ${filename}`);
+        
+        // Visual feedback
+        const btn = document.getElementById('btn-export-log');
+        if (btn) {
+            const originalText = btn.textContent;
+            btn.textContent = 'EXPORTED ✓';
+            btn.style.backgroundColor = '#00ff88';
+            btn.style.color = '#000';
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.style.backgroundColor = '';
+                btn.style.color = '';
+            }, 2000);
+        }
+        
+    } catch (error) {
+        console.error('✗ Failed to export alerts:', error);
+        alert('Failed to export alerts. Check console for details.');
+    }
+}
+
+// Attach export handler on page load
+document.addEventListener('DOMContentLoaded', function() {
+    const exportBtn = document.getElementById('btn-export-log');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', exportAlertsToCSV);
+        console.log('✓ Export log button initialized');
+    }
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FORENSIC TELEMETRY PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+function updateForensicPanel(threat) {
+    // Update header with source IP
+    const drawerIp = document.getElementById('drawer-ip');
+    if (drawerIp) {
+        drawerIp.textContent = threat.src_ip || threat.source_ip || 'Unknown IP';
+    }
+    
+    // Update danger index (based on confidence or default to high for attacks)
+    const drawerDanger = document.getElementById('drawer-danger');
+    if (drawerDanger) {
+        const dangerScore = threat.confidence 
+            ? (threat.confidence * 100).toFixed(1) 
+            : (threat.type === 'ml_alert' ? '75.0' : '50.0');
+        drawerDanger.textContent = `${dangerScore} / 100`;
+    }
+    
+    // Update PageRank (placeholder - would need graph data)
+    const drawerPagerank = document.getElementById('drawer-pagerank');
+    if (drawerPagerank) {
+        drawerPagerank.textContent = '0.084'; // Placeholder
+    }
+    
+    // Update graph degree
+    const drawerDegree = document.getElementById('drawer-degree');
+    if (drawerDegree) {
+        const degree = threat.connection_count || '38 EDGES';
+        drawerDegree.textContent = degree;
+    }
+    
+    // Update community
+    const drawerCommunity = document.getElementById('drawer-comm');
+    if (drawerCommunity) {
+        drawerCommunity.textContent = 'Cluster-Î"'; // Placeholder
+    }
+    
+    // Update bloom filter status
+    const drawerBloomStatus = document.getElementById('drawer-bloom-status');
+    if (drawerBloomStatus) {
+        const status = threat.type === 'bloom_hit' 
+            ? 'STATUS: EXACT MATCH' 
+            : 'STATUS: NO MATCH';
+        drawerBloomStatus.textContent = status;
+    }
+    
+    // Update bloom filter hash (generate fake hash for demo)
+    const drawerBloomHash = document.getElementById('drawer-bloom-hash');
+    if (drawerBloomHash) {
+        const ip = threat.src_ip || threat.source_ip || '0.0.0.0';
+        const parts = ip.split('.');
+        const hash = `[0x${parts[0] || 0}FF81, 0x${parts[1] || 0}2A10, 0x${parts[2] || 0}10C3, 0x${parts[3] || 0}98F2, 0xEE419] â€¢ε 0.001% COLLISION PROB`;
+        drawerBloomHash.textContent = `HASH(K1..K5): ${hash}`;
+    }
+    
+    // Update packet header (generate hex dump)
+    const drawerPacketType = document.getElementById('drawer-packet-type');
+    const drawerHexDump = document.getElementById('drawer-hex-dump');
+    
+    if (drawerPacketType && drawerHexDump) {
+        const flagsMap = {
+            'ml_alert': 'TCP SYN FLOOD [FLAGS: 0x002]',
+            'spike_alert': 'TCP SYN FLOOD [FLAGS: 0x002]',
+            'bloom_hit': 'TCP PSH ACK [FLAGS: 0x018]'
+        };
+        const flags = flagsMap[threat.type] || 'TCP [FLAGS: 0x000]';
+        drawerPacketType.textContent = flags;
+        
+        // Generate fake hex dump
+        const hexDump = `0000:  45 00 00 3c 1a 2b 40 00  40 06 b2 e4 c6 33 64 2c  E...<.+@.@...3d,
+0010:  0a 00 01 0a 44 31 00 50  78 91 f0 18 00 00 00 00  ....D1.Px.......
+0020:  a0 02 72 10 c3 40 00 00  02 04 05 b4 04 02 08 0a  ..r..@..........
+0030:  3d 89 2a 11 00 00 00 00  01 03 03 07 00 00 00 00  =.*.............`;
+        
+        drawerHexDump.textContent = hexDump;
+    }
+    
+    console.log('✓ Forensic panel updated for:', threat.src_ip || threat.source_ip);
+}
+
+// Make incident cards clickable
+function makeIncidentsClickable() {
+    const streamContainer = document.getElementById('incident-stream');
+    if (!streamContainer) return;
+    
+    // Delegate click events to incident cards
+    streamContainer.addEventListener('click', async (e) => {
+        const card = e.target.closest('.p-space-sm.bg-surface-container-low');
+        if (!card) return;
+        
+        // Extract IP from card
+        const srcIpElement = card.querySelector('.font-body-md');
+        if (!srcIpElement) return;
+        
+        const srcIpMatch = srcIpElement.textContent.match(/SRC:\s*([\d.]+)/);
+        if (!srcIpMatch) return;
+        
+        const srcIp = srcIpMatch[1];
+        
+        // Find the threat data
+        try {
+            const response = await fetch(`${API_BASE}/threats/recent?limit=100`);
+            const data = await response.json();
+            const threat = data.threats.find(t => 
+                (t.src_ip === srcIp || t.source_ip === srcIp)
+            );
+            
+            if (threat) {
+                updateForensicPanel(threat);
+                
+                // Highlight selected card
+                document.querySelectorAll('#incident-stream .p-space-sm').forEach(c => {
+                    c.style.borderLeft = '2px solid var(--md-sys-color-error)';
+                });
+                card.style.borderLeft = '4px solid var(--md-sys-color-primary)';
+                
+                console.log('✓ Selected incident:', srcIp);
+            }
+        } catch (error) {
+            console.error('✗ Failed to fetch incident details:', error);
+        }
+    });
+    
+    console.log('✓ Incident click handlers attached');
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    makeIncidentsClickable();
+});

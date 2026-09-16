@@ -103,19 +103,22 @@ def cmd_all(args: argparse.Namespace) -> None:
     results = run_analytics(G, top_n=args.top_n)
     print_summary(results)
 
-    # 3. Write to MongoDB + export HTML
+    # 3. Write to MongoDB + export HTML + JSON
     logger.info("Step 3/3 — Persisting results …")
     output = Path(args.output) if args.output else None
     with GraphWriter() as writer:
         writer.write_to_mongo(G, results)
-        out_path = writer.export_pyvis(G, results, output_path=output)
+        html_path = writer.export_pyvis(G, results, output_path=output)
+        json_path = writer.export_json(G, results)  # NEW: Export JSON
 
     elapsed = time.time() - t0
     print("\n══════════════════════════════════════════════════════════")
     print(f"  Phase 5 complete in {elapsed:.1f}s")
     print(f"  MongoDB: graph_nodes, graph_edges, graph_communities, graph_meta")
-    if out_path:
-        print(f"  PyVis HTML: {out_path}")
+    if html_path:
+        print(f"  PyVis HTML: {html_path}")
+    if json_path:
+        print(f"  JSON export: {json_path}")
     print("══════════════════════════════════════════════════════════\n")
 
 
