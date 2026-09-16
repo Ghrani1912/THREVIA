@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THREVIA API Test</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0c0f0e;
+            color: #44f498;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #ffc58a;
+            border-bottom: 2px solid #ffc58a;
+            padding-bottom: 10px;
+        }
+        .test-section {
+            background: #1d201f;
+            border: 1px solid #323534;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .test-section h2 {
+            color: #ff9e1b;
+            margin-top: 0;
+        }
+        button {
+            background: #ff9e1b;
+            color: #0c0f0e;
+            border: none;
+            padding: 10px 20px;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            cursor: pointer;
+            margin: 5px;
+            border-radius: 3px;
+        }
+        button:hover {
+            background: #ffc58a;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 3px;
+        }
+        .status.success {
+            background: #005730;
+            color: #44f498;
+        }
+        .status.error {
+            background: #93000a;
+            color: #ffb4ab;
+        }
+        .status.info {
+            background: #323534;
+            color: #dac2ae;
+        }
+        pre {
+            background: #111413;
+            padding: 15px;
+            border-radius: 3px;
+            overflow-x: auto;
+            border-left: 3px solid #44f498;
+        }
+        .metric {
+            display: inline-block;
+            background: #282b29;
+            padding: 10px 15px;
+            margin: 5px;
+            border-radius: 3px;
+            min-width: 150px;
+        }
+        .metric-label {
+            color: #dac2ae;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        .metric-value {
+            color: #ffc58a;
+            font-size: 24px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔬 THREVIA API Connection Tester</h1>
+    
+    <div class="test-section">
+        <h2>1. Connection Test</h2>
+        <p>Testing API availability at: <strong id="api-url">http://localhost:8000</strong></p>
+        <button onclick="testConnection()">Test Connection</button>
+        <div id="connection-status"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>2. Summary Metrics</h2>
+        <button onclick="testMetrics()">Fetch Metrics</button>
+        <div id="metrics-display"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>3. Recent Threats</h2>
+        <button onclick="testThreats()">Fetch Threats</button>
+        <div id="threats-display"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>4. WebSocket Test</h2>
+        <button onclick="testWebSocket()">Connect WebSocket</button>
+        <button onclick="closeWebSocket()">Disconnect</button>
+        <div id="websocket-status"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>5. Raw API Response</h2>
+        <button onclick="showRawHealth()">GET /api/v1/health</button>
+        <button onclick="showRawMetrics()">GET /api/v1/metrics/summary</button>
+        <button onclick="showRawThreats()">GET /api/v1/threats/recent</button>
+        <pre id="raw-response"></pre>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let ws = null;
+
+        function showStatus(elementId, message, type) {
+            const el = document.getElementById(elementId);
+            el.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        async function testConnection() {
+            showStatus('connection-status', '🔄 Testing connection...', 'info');
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/health`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showStatus('connection-status', 
+                        `✅ Connected successfully!<br>` +
+                        `Status: ${data.status}<br>` +
+                        `MongoDB: ${data.mongodb}<br>` +
+                        `Active WebSockets: ${data.active_websockets}<br>` +
+                        `Timestamp: ${data.timestamp}`, 
+                        'success');
+                } else {
+                    showStatus('connection-status', 
+                        `⚠️ API responded with status ${response.status}`, 
+                        'error');
+                }
+            } catch (error) {
+                showStatus('connection-status', 
+                    `❌ Connection failed: ${error.message}<br><br>` +
+                    `Make sure the FastAPI server is running:<br>` +
+                    `<code>python backend/api/main.py</code>`, 
+                    'error');
+            }
+        }
+
+        async function testMetrics() {
+            showStatus('metrics-display', '🔄 Fetching metrics...', 'info');
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/metrics/summary`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    document.getElementById('metrics-display').innerHTML = `
+                        <div class="status success">✅ Metrics retrieved</div>
+                        <div class="metric">
+                            <div class="metric-label">Total Threats</div>
+                            <div class="metric-value">${data.total_threats || 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Critical Alerts</div>
+                            <div class="metric-value" style="color: #ffb4ab">${data.critical_alerts || 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">High Alerts</div>
+                            <div class="metric-value" style="color: #ff9e1b">${data.high_alerts || 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Active Threats</div>
+                            <div class="metric-value">${data.active_threats || 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Bloom Hits</div>
+                            <div class="metric-value">${data.bloom_hits || 0}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Detection Rate</div>
+                            <div class="metric-value">${data.detection_rate || 0}%</div>
+                        </div>
+                    `;
+                } else {
+                    showStatus('metrics-display', `⚠️ Failed with status ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showStatus('metrics-display', `❌ ${error.message}`, 'error');
+            }
+        }
+
+        async function testThreats() {
+            showStatus('threats-display', '🔄 Fetching threats...', 'info');
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/threats/recent?limit=5`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    if (data.threats && data.threats.length > 0) {
+                        let html = `<div class="status success">✅ Found ${data.threats.length} threats</div>`;
+                        html += '<pre>' + JSON.stringify(data.threats.slice(0, 3), null, 2) + '</pre>';
+                        document.getElementById('threats-display').innerHTML = html;
+                    } else {
+                        showStatus('threats-display', 
+                            '⚠️ No threats found in database.<br><br>' +
+                            'Run this to populate sample data:<br>' +
+                            '<code>python backend/realtime/stream_simulator.py --quick-populate</code>', 
+                            'info');
+                    }
+                } else {
+                    showStatus('threats-display', `⚠️ Failed with status ${response.status}`, 'error');
+                }
+            } catch (error) {
+                showStatus('threats-display', `❌ ${error.message}`, 'error');
+            }
+        }
+
+        function testWebSocket() {
+            showStatus('websocket-status', '🔄 Connecting to WebSocket...', 'info');
+            
+            ws = new WebSocket('ws://localhost:8000/api/v1/threats/live');
+            
+            ws.onopen = () => {
+                showStatus('websocket-status', 
+                    '✅ WebSocket connected!<br>Listening for live threat updates...', 
+                    'success');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const current = document.getElementById('websocket-status');
+                current.innerHTML += `<div class="status info">📨 Received: ${data.type}</div>`;
+            };
+            
+            ws.onerror = (error) => {
+                showStatus('websocket-status', `❌ WebSocket error`, 'error');
+            };
+            
+            ws.onclose = () => {
+                showStatus('websocket-status', '🔌 WebSocket disconnected', 'info');
+            };
+        }
+
+        function closeWebSocket() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        async function showRaw(endpoint) {
+            try {
+                const response = await fetch(`${API_BASE}${endpoint}`);
+                const data = await response.json();
+                document.getElementById('raw-response').textContent = 
+                    `HTTP ${response.status} ${response.statusText}\n\n` +
+                    JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById('raw-response').textContent = 
+                    `Error: ${error.message}`;
+            }
+        }
+
+        function showRawHealth() { showRaw('/api/v1/health'); }
+        function showRawMetrics() { showRaw('/api/v1/metrics/summary'); }
+        function showRawThreats() { showRaw('/api/v1/threats/recent?limit=5'); }
+
+        // Auto-test connection on load
+        window.onload = () => {
+            setTimeout(testConnection, 500);
+        };
+    </script>
+</body>
+</html>

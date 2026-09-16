@@ -48,6 +48,8 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+from pyspark.ml import PipelineModel
+from pyspark.ml.classification import RandomForestClassificationModel
 
 from backend.realtime.bloom_filter import ThreatBloomFilter
 from backend.realtime.alert_writer import AlertWriter
@@ -62,6 +64,13 @@ SPIKE_THRESHOLD = int(os.getenv("SPIKE_THRESHOLD", "50"))
 WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "60"))
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 MONGO_DB = os.getenv("MONGO_DB", "threvia")
+ML_THRESHOLD = float(os.getenv("ML_THRESHOLD", "0.25"))  # Lowered for CIC-2017 DDoS
+
+# Model paths
+MODELS_BASE = "hdfs://namenode:8020/threvia/models_clean"
+SCALER_PATH = f"{MODELS_BASE}/scaler_pipeline"
+RF_BINARY_PATH = f"{MODELS_BASE}/rf_binary"
+RF_BOT_PATH = f"{MODELS_BASE}/rf_bot_binary"
 
 # JSON schema emitted by stream_simulator
 _SCHEMA = StructType([
@@ -108,8 +117,6 @@ def _bloom_batch_handler(bloom: ThreatBloomFilter, writer: AlertWriter):
                 hits.append({
                     "src_ip":     row["srcip"],
                     "dst_ip":     row["dstip"],
-                    "proto":      row["proto"],
-                    "service":    row["service"],
                     "attack_cat": row["attack_cat"],
                     "label":      row["label"],
                     "event_time": row["event_time"],
@@ -155,6 +162,129 @@ def _spike_batch_handler(writer: AlertWriter):
     return handler
 
 
+# ── ML foreachBatch handler ────────────────────────────────────────────────────
+
+def _ml_batch_handler(scaler, rf_binary, rf_bot, writer: AlertWriter, threshold: float):
+    """
+    Returns a foreachBatch function for ML-based classification.
+    Applies scaler → binary RF → bot RF and writes alerts above threshold.
+    """
+    from pyspark.ml.linalg import Vectors, VectorUDT
+    from pyspark.sql.functions import udf
+    
+    # UDF to extract probability of attack class (index 1)
+    @udf("double")
+    def extract_prob_attack(probability):
+        if probability is not None:
+            # probability is a DenseVector or SparseVector
+            return float(probability[1])
+        return 0.0
+    
+    def handler(batch_df, batch_id: int):
+        if batch_df.count() == 0:
+            return
+        
+        logger.info("Batch %d: processing %d rows", batch_id, batch_df.count())
+        
+        try:
+            # Apply scaler
+            scaled_df = scaler.transform(batch_df)
+            logger.info("Batch %d: scaler OK, rows=%d", batch_id, scaled_df.count())
+            
+            # Binary classification (attack vs benign)
+            predictions = rf_binary.transform(scaled_df)
+            logger.info("Batch %d: binary classifier OK", batch_id)
+            
+            # Extract probability as a column
+            predictions_with_prob = predictions.withColumn(
+                "p_attack", 
+                extract_prob_attack(F.col("probability"))
+            )
+            
+            # Filter to attacks above threshold
+            attacks = predictions_with_prob.filter(
+                F.col("p_attack") >= threshold
+            )
+            
+            attack_count = attacks.count()
+            logger.info("Batch %d: %d flows above threshold %.2f", 
+                       batch_id, attack_count, threshold)
+            
+            if attack_count == 0:
+                logger.info("Batch %d: no ML alerts (all flows below T=%.2f)", 
+                           batch_id, threshold)
+                return
+            
+            # Bot sub-classification
+            # Drop existing prediction/probability columns from binary classifier
+            attacks_clean = attacks.drop("prediction", "probability", "rawPrediction")
+            bot_predictions = rf_bot.transform(attacks_clean)
+            logger.info("Batch %d: bot classifier OK", batch_id)
+            
+            # Collect and write alerts
+            rows = bot_predictions.select(
+                "srcip", "dstip", "label", "attack_cat", "event_time",
+                "p_attack",
+                F.col("prediction").alias("is_bot")
+            ).collect()
+            
+            alerts = []
+            for row in rows:
+                p_attack = float(row["p_attack"])
+                is_bot = int(row["is_bot"])
+                
+                # Determine attack type
+                if is_bot == 1:
+                    attack_type = "Bot"
+                else:
+                    # Check ground truth label (for labeled data)
+                    true_label = row["label"]
+                    true_cat = row["attack_cat"]
+                    
+                    if "DDoS" in true_cat or "DoS" in true_cat or "DDoS" in true_label:
+                        attack_type = "DDoS"
+                    elif true_label and true_label != "BENIGN" and true_label != "0":
+                        # Other attack types from ground truth
+                        attack_type = true_label
+                    elif p_attack > 0.65:
+                        # High confidence non-bot attack likely DDoS
+                        attack_type = "DDoS"
+                    else:
+                        attack_type = "Unknown"
+                
+                # Determine severity based on confidence
+                if p_attack >= 0.85:
+                    severity = "Critical"
+                elif p_attack >= 0.65:
+                    severity = "High"
+                elif p_attack >= 0.40:
+                    severity = "Medium"
+                else:
+                    severity = "Low"
+                
+                alerts.append({
+                    "src_ip": row["srcip"],
+                    "dst_ip": row["dstip"],
+                    "attack_type": attack_type,
+                    "confidence": p_attack,
+                    "severity": severity,
+                    "ground_truth_label": row["label"],
+                    "ground_truth_cat": row["attack_cat"],
+                    "event_time": row["event_time"],
+                })
+            
+            if alerts:
+                written = writer.write_ml_alerts_bulk(alerts)
+                logger.info("Batch %d: %d ML alerts written (%s types)",
+                           batch_id, written, 
+                           ", ".join(set(a["attack_type"] for a in alerts)))
+        
+        except Exception as e:
+            logger.error("Batch %d ML handler error: %s", batch_id, e, exc_info=True)
+    
+    return handler
+
+
 # ── Main streaming job ─────────────────────────────────────────────────────────
 
 def run_streaming_detector() -> None:
@@ -189,30 +319,37 @@ def run_streaming_detector() -> None:
     )
     spark.sparkContext.setLogLevel("WARN")
 
-    # ── 4. Read from TCP socket ───────────────────────────────────────────────
+    # ── 4. Load ML models (requires active Spark session) ────────────────────
+    logger.info("Loading ML models from HDFS …")
+    scaler = PipelineModel.load(SCALER_PATH)
+    rf_binary = RandomForestClassificationModel.load(RF_BINARY_PATH)
+    rf_bot = RandomForestClassificationModel.load(RF_BOT_PATH)
+    logger.info("ML models ready (threshold=%.2f)", ML_THRESHOLD)
+
+    # ── 5. Read from file stream ──────────────────────────────────────────────
+    # Infer schema from existing files
+    logger.info("Inferring schema from existing stream files …")
+    sample_schema = spark.read.json("/tmp/threvia_stream").schema
+    logger.info("Schema inferred: %d columns", len(sample_schema.fields))
+    
+    # Read JSON files with inferred schema
     raw_stream = (
         spark.readStream
-        .format("socket")
-        .option("host", STREAM_HOST)
-        .option("port", STREAM_PORT)
-        .load()
+        .format("json")
+        .schema(sample_schema)
+        .option("maxFilesPerTrigger", 1)
+        .load("/tmp/threvia_stream")
     )
 
-    # Parse JSON lines
-    parsed = (
-        raw_stream
-        .select(F.from_json(F.col("value"), _SCHEMA).alias("data"))
-        .select("data.*")
+    # Data is already parsed, just add timestamp
+    parsed = raw_stream.withColumn(
+        "event_ts", 
+        F.to_timestamp("event_time", "yyyy-MM-dd HH:mm:ss")
     )
 
-    # Cast numeric fields
-    typed = parsed.withColumn("sbytes_num", F.col("sbytes").cast(DoubleType())) \
-                  .withColumn("dbytes_num", F.col("dbytes").cast(DoubleType())) \
-                  .withColumn("event_ts",   F.to_timestamp("event_time", "yyyy-MM-dd HH:mm:ss"))
-
-    # ── 5. Pipeline A: Bloom Filter hits (row-level) ──────────────────────────
+    # ── 6. Pipeline A: Bloom Filter hits (row-level) ──────────────────────────
     bloom_query = (
-        typed
+        parsed
         .writeStream
         .outputMode("append")
         .foreachBatch(_bloom_batch_handler(bloom, writer))
@@ -222,9 +359,9 @@ def run_streaming_detector() -> None:
     )
     logger.info("Bloom Filter streaming query started.")
 
-    # ── 6. Pipeline B: Windowed spike detection ───────────────────────────────
+    # ── 7. Pipeline B: Windowed spike detection ───────────────────────────────
     windowed = (
-        typed
+        parsed
         .withWatermark("event_ts", "30 seconds")
         .groupBy(
             F.col("srcip"),
@@ -232,7 +369,7 @@ def run_streaming_detector() -> None:
         )
         .agg(
             F.count("*").alias("connection_count"),
-            F.sum("sbytes_num").alias("total_bytes"),
+            F.sum("Flow Bytes/s").alias("total_bytes"),
             # Majority label in this window (highest count wins)
             F.first("label").alias("majority_label"),
         )
@@ -261,10 +398,22 @@ def run_streaming_detector() -> None:
         WINDOW_SECONDS, SPIKE_THRESHOLD,
     )
 
-    # ── 7. Block until terminated ─────────────────────────────────────────────
+    # ── 8. Pipeline C: ML-based classification ────────────────────────────────
+    # Use the same parsed stream for ML
+    ml_query = (
+        parsed
+        .writeStream
+        .outputMode("append")
+        .foreachBatch(_ml_batch_handler(scaler, rf_binary, rf_bot, writer, ML_THRESHOLD))
+        .option("checkpointLocation", "/tmp/threvia_checkpoint_ml")
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+    logger.info("ML classification query started (threshold=%.2f).", ML_THRESHOLD)
+
+    # ── 9. Block until terminated ─────────────────────────────────────────────
     logger.info(
-        "Streaming detector running. Connect stream_simulator to %s:%d.",
-        STREAM_HOST, STREAM_PORT,
+        "Streaming detector running. Reading from /tmp/threvia_stream/.",
     )
     try:
         spark.streams.awaitAnyTermination()
@@ -273,6 +422,7 @@ def run_streaming_detector() -> None:
     finally:
         bloom_query.stop()
         spike_query.stop()
+        ml_query.stop()
         writer.close()
         spark.stop()
         logger.info("Streaming detector stopped cleanly.")

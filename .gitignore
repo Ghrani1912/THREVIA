@@ -52,6 +52,15 @@ backend/data/ids2025_clean/
 # PortScan clean splits
 backend/data/portscan_clean/
 
+# Benign clean splits
+backend/data/benign_clean/
+
+# Botnet data
+backend/data/botnet/
+
+# New DoS datasets
+backend/data/new_dos/
+
 # Generic data file extensions anywhere under backend/data
 backend/data/**/*.csv
 backend/data/**/*.parquet
@@ -78,9 +87,26 @@ backend/output/
 spark-warehouse/
 *.out
 derby.log
+metastore_db/
 
 # Streamlit cache
 dashboard/.streamlit/
+
+# Temporary debug/test scripts (optional - remove if you want to keep them)
+backend/realtime/analyze_original_training_data.py
+backend/realtime/check_*.py
+backend/realtime/compare_*.py
+backend/realtime/debug_*.py
+backend/realtime/quick_check_data.py
+backend/realtime/test_pipeline_accuracy.py
+backend/realtime/verify_*.py
+backend/realtime/populate_mongo.py
+backend/ml/diagnose_*.py
+backend/ml/comprehensive_eval_report.py
+backend/ml/prob_dist_check.py
+backend/ml/threshold_test.py
+backend/ml/verify_*.py
+backend/processing/verify_*.py
 
 # ─────────────────────────────────────────────────────────────
 # Jupyter

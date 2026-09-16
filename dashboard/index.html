@@ -1,0 +1,405 @@
+﻿<!DOCTYPE html>
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..900&display=swap" rel="stylesheet"/><style>@layer base{html,body{margin:0;padding:0;}body{overscroll-behavior:none;}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{"colors":{"surface-tint":"#ffb86c","on-primary":"#492900","tertiary-fixed-dim":"#ffb3ad","on-tertiary-fixed":"#410004","on-secondary-container":"#005730","on-background":"#e1e3e1","on-primary-fixed-variant":"#683c00","on-tertiary-container":"#920013","on-tertiary-fixed-variant":"#930013","on-surface-variant":"#dac2ae","tertiary-container":"#ff9891","outline-variant":"#544434","on-secondary-fixed":"#00210f","surface":"#111413","surface-bright":"#373a38","surface-variant":"#323534","surface-container":"#1d201f","primary-container":"#ff9e1b","primary-fixed-dim":"#ffb86c","surface-container-lowest":"#0c0f0e","outline":"#a28d7a","on-error-container":"#ffdad6","on-primary-container":"#673c00","inverse-primary":"#895100","error":"#ffb4ab","on-surface":"#e1e3e1","on-error":"#690005","tertiary-fixed":"#ffdad7","primary":"#ffc58a","on-secondary":"#00391d","inverse-on-surface":"#2e3130","secondary-fixed":"#59ffa3","on-secondary-fixed-variant":"#00522d","surface-container-high":"#282b29","error-container":"#93000a","on-primary-fixed":"#2c1600","surface-dim":"#111413","on-tertiary":"#68000a","background":"#111413","secondary":"#44f498","tertiary":"#ffc1bc","secondary-fixed-dim":"#27e288","surface-container-highest":"#323534","inverse-surface":"#e1e3e1","surface-container-low":"#191c1b","primary-fixed":"#ffdcbc","secondary-container":"#01d77e"},"borderRadius":{"DEFAULT":"0.25rem","lg":"0.5rem","xl":"0.75rem","full":"9999px"},"spacing":{"space-md":"0.5rem","space-xl":"1rem","space-sm":"0.25rem","margin":"0.75rem","space-xs":"0.125rem","gutter":"0.5rem","space-lg":"0.75rem"},"fontFamily":{"body-sm":["Inter"],"label-lg":["JetBrains Mono"],"label-md":["JetBrains Mono"],"label-sm":["JetBrains Mono"],"body-md":["Inter"],"headline-lg":["Inter"],"headline-md":["Inter"],"body-lg":["Inter"],"headline-sm":["Inter"]},"fontSize":{"body-sm":["0.75rem",{"lineHeight":"1rem","fontWeight":"400"}],"label-lg":["0.8125rem",{"lineHeight":"1rem","letterSpacing":"0.04em","fontWeight":"500"}],"label-md":["0.75rem",{"lineHeight":"0.875rem","letterSpacing":"0.06em","fontWeight":"500"}],"label-sm":["0.6875rem",{"lineHeight":"0.75rem","letterSpacing":"0.08em","fontWeight":"400"}],"body-md":["0.8125rem",{"lineHeight":"1.125rem","fontWeight":"400"}],"headline-lg":["1.5rem",{"lineHeight":"1.75rem","letterSpacing":"-0.02em","fontWeight":"700"}],"headline-md":["1.25rem",{"lineHeight":"1.5rem","letterSpacing":"-0.01em","fontWeight":"600"}],"body-lg":["0.875rem",{"lineHeight":"1.25rem","fontWeight":"400"}],"headline-sm":["1rem",{"lineHeight":"1.25rem","letterSpacing":"0em","fontWeight":"600"}]}}}}</script></head><body class="bg-surface-container-lowest text-on-surface font-body-sm text-body-sm antialiased selection:bg-primary selection:text-on-primary"><header class="fixed top-0 left-0 w-full z-50 bg-surface-container-lowest border-b border-outline-variant/40"><div class="h-24 w-full px-margin flex flex-col justify-between py-space-xs"><div class="h-12 w-full flex items-center justify-between border-b border-outline-variant/20 pb-space-xs"><div class="flex items-center gap-space-lg"><div class="flex items-center gap-space-sm"><div class="w-2.5 h-2.5 bg-secondary animate-ping"></div><div class="flex flex-col"><span class="font-label-lg text-label-lg uppercase tracking-wider text-primary font-bold">THREVIA // SOC-INTEL v1.0.0</span><span class="font-label-sm text-label-sm text-on-surface-variant" id="node-id">NODE-ID: [PRODUCTION] // THREAT-NET</span></div></div><div class="hidden xl:flex items-center gap-space-md border-l border-outline-variant/30 pl-space-md font-label-sm text-label-sm"><div class="flex items-center gap-space-xs"><span class="text-on-surface-variant">UTC:</span><span class="text-on-surface font-semibold" id="utc-time">Loading...</span></div><div class="flex items-center gap-space-xs"><span class="text-on-surface-variant">INGEST:</span><span class="text-secondary" id="ingest-rate">-- Mpps</span></div><div class="flex items-center gap-space-xs"><span class="text-on-surface-variant">BUFF:</span><span class="text-secondary-fixed" id="buffer-status">-- NOMINAL</span></div></div><div class="flex items-center gap-space-xs font-label-sm text-label-sm border-l border-outline-variant/30 pl-space-md"><span class="px-space-sm py-space-xs border border-error bg-error-container/20 text-error font-bold" id="crit-badge">0 CRIT</span><span class="px-space-sm py-space-xs border border-primary-container bg-primary-container/20 text-primary-container font-bold" id="elev-badge">0 ELEV</span><span class="px-space-sm py-space-xs border border-secondary bg-secondary/10 text-secondary" id="nominal-badge">0 NOMINAL</span></div></div><div class="flex items-center gap-space-md"><div class="hidden 2xl:flex items-center gap-space-sm font-label-sm text-label-sm border border-outline-variant/30 px-space-md py-space-xs bg-surface-container-low"><span class="text-on-surface-variant">SUBSYSTEMS:</span><span class="text-secondary">CORE: OK</span><span class="text-outline-variant">|</span><span class="text-secondary-fixed-dim">BLOOM: HIT-FAST</span><span class="text-outline-variant">|</span><span class="text-primary-container">MODEL_BOT: DEGRADED (0.3%)</span><span class="text-outline-variant">|</span><span class="text-primary-fixed-dim">MODEL_INFIL: BLIND (0%)</span></div><div class="flex items-center gap-space-sm"><button class="px-space-sm py-space-xs border border-outline-variant hover:border-outline text-on-surface-variant hover:text-on-surface bg-surface-container-low transition-colors" title="Audio Mute Toggle" type="button"><span class="material-symbols-outlined text-[18px]">volume_up</span></button><button class="px-space-sm py-space-xs border border-error-container hover:border-error bg-error-container/10 hover:bg-error-container text-error hover:text-on-error transition-colors flex items-center gap-space-xs font-label-sm text-label-sm uppercase font-bold" title="Incident Escalation Mode" type="button"><span class="material-symbols-outlined text-[16px]">warning</span><span>ESCALATE</span></button><button class="px-space-sm py-space-xs border border-outline-variant hover:border-outline bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface font-label-sm text-label-sm uppercase transition-colors" title="Export Telemetry Log" type="button">EXPORT LOG</button><div class="hidden lg:flex flex-col items-end border-l border-outline-variant/30 pl-space-sm"><span class="font-label-sm text-label-sm text-primary uppercase font-bold">SEC-OP // ANALYST</span><span class="font-label-sm text-label-sm text-on-surface-variant">TIER-3 [#704]</span></div><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></div><div class="h-10 w-full flex items-center justify-between"><nav class="flex items-center gap-space-xs overflow-x-auto" data-active-classes="bg-primary-container text-on-primary-container font-bold"><a aria-current="page" class="px-space-md py-space-xs uppercase tracking-wider border border-transparent hover:border-outline-variant/50 transition-colors whitespace-nowrap bg-primary-container text-on-primary-container font-bold font-label-md text-label-md" data-path="live-overview" href="#">[RADAR-01] Live Overview</a><a class="px-space-md py-space-xs font-label-md text-label-md uppercase tracking-wider text-on-surface-variant hover:text-on-surface border border-transparent hover:border-outline-variant/50 transition-colors whitespace-nowrap" data-path="model-diagnostics" href="#">[EVAL-HONEST] Model Diagnostics</a></nav><div class="hidden md:flex items-center gap-space-md font-label-sm text-label-sm text-on-surface-variant"><span class="flex items-center gap-space-xs"><span class="w-1.5 h-1.5 bg-secondary"></span><span id="api-status">LINK: API SYNCHRONIZED</span></span><span class="text-outline-variant">|</span><span>MTU: 9000 JUMBO</span></div></div></div></header><main class="w-full pt-24 bg-surface-container-lowest min-h-screen"><div class="flex flex-col w-full">
+
+<!-- TOP TELEMETRY BANNER -->
+<section class="w-full px-margin py-space-sm bg-surface-container-lowest" id="alert-banner">
+<div class="w-full bg-surface-container-low p-space-sm">
+<div class="flex flex-col xl:flex-row xl:items-center justify-between gap-space-sm">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="flex items-center gap-space-xs px-space-sm py-space-xs bg-error-container text-on-error font-label-md text-label-md uppercase tracking-wider font-bold">
+<span class="material-symbols-outlined text-[16px]">priority_high</span>
+<span id="alert-number">ALERT #TR-8821</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-label-md text-label-md text-error uppercase font-semibold truncate" id="alert-title">
+              Active Infiltration & Distributed PortScan detected on Gateway Ingress Cluster 04
+            </span>
+<span class="font-label-sm text-label-sm text-on-surface-variant truncate" id="alert-details">
+              ASNS: [AS13335, AS16509, AS14061, AS9009] â€¢ INGRESS: 4.88 Gbps â€¢ PKT-DELTA: +418% Baseline
+            </span>
+</div>
+</div>
+<div class="flex flex-wrap items-center gap-space-xs font-label-sm text-label-sm">
+<button class="px-space-md py-space-xs bg-error text-on-error uppercase font-bold hover:bg-error-container hover:text-on-error-container transition-colors flex items-center gap-space-xs" id="btn-killstream" type="button">
+<span class="material-symbols-outlined text-[14px]">bolt</span>
+<span>KILLSTREAM SESSION</span>
+</button>
+<button class="px-space-md py-space-xs bg-primary-container text-on-primary-container uppercase font-bold hover:bg-primary hover:text-on-primary transition-colors flex items-center gap-space-xs" id="btn-isolate" type="button">
+<span class="material-symbols-outlined text-[14px]">shield</span>
+<span>ISOLATE INGRESS GW-04</span>
+</button>
+<button class="px-space-md py-space-xs bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors flex items-center gap-space-xs" type="button">
+<span class="material-symbols-outlined text-[14px]">confirmation_number</span>
+<span>DISPATCH TICKET</span>
+</button>
+<button class="px-space-md py-space-xs bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors flex items-center gap-space-xs" type="button">
+<span class="material-symbols-outlined text-[14px]">download</span>
+<span>TRIGGER PCAP DUMP</span>
+</button>
+</div>
+</div>
+</div>
+</section>
+
+<!-- MAIN WORKSPACE -->
+<main class="w-full px-margin pb-space-md grid grid-cols-1 xl:grid-cols-12 gap-space-md">
+
+<!-- LEFT: RADAR PANEL -->
+<div class="xl:col-span-7 2xl:col-span-8 flex flex-col gap-space-md min-w-0">
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm relative">
+
+<!-- View tabs -->
+<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-sm bg-surface-container-lowest p-space-xs">
+<div class="flex items-center gap-space-xs">
+<button class="px-space-md py-space-xs font-label-sm text-label-sm uppercase tracking-wider bg-primary-container text-on-primary-container font-bold flex items-center gap-space-xs" id="tab-radar" type="button">
+<span class="material-symbols-outlined text-[14px]">radar</span>
+<span>[POLAR ATTACK RADAR]</span>
+</button>
+<button class="px-space-md py-space-xs font-label-sm text-label-sm uppercase tracking-wider bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors flex items-center gap-space-xs" id="tab-topology" type="button">
+<span class="material-symbols-outlined text-[14px]">hub</span>
+<span>[NETWORK TOPOLOGY]</span>
+</button>
+<button class="px-space-md py-space-xs font-label-sm text-label-sm uppercase tracking-wider bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors flex items-center gap-space-xs" id="tab-spectral" type="button">
+<span class="material-symbols-outlined text-[14px]">waterfall_chart</span>
+<span>[SPECTRAL]</span>
+</button>
+</div>
+<div class="flex items-center gap-space-md font-label-sm text-label-sm">
+<div class="flex items-center gap-space-xs">
+<span class="w-2 h-2 bg-secondary inline-block animate-pulse"></span>
+<span class="text-secondary font-bold">SWEEP ACTIVE: 24 RPM</span>
+</div>
+<button class="px-space-sm py-space-xs bg-surface-container-high text-on-surface-variant hover:text-on-surface uppercase text-label-sm font-label-sm" id="btn-pause-radar" type="button">
+              [SPACE] FREEZE
+            </button>
+</div>
+</div>
+
+<!-- RADAR CANVAS -->
+<div class="relative w-full h-[520px] bg-surface-container-lowest flex items-center justify-center overflow-hidden">
+<div class="absolute inset-0 pointer-events-none opacity-10 bg-[radial-gradient(circle_at_center,_transparent_0%,_#000000_100%)]"></div>
+
+<canvas class="max-w-full max-h-full cursor-crosshair" height="520" id="radarCanvas" width="520"></canvas>
+
+<!-- HUD Overlays -->
+<div class="absolute top-space-md left-space-md bg-surface-container/90 p-space-sm font-label-sm text-label-sm flex flex-col gap-space-xs backdrop-blur pointer-events-none">
+<div class="text-primary font-bold tracking-widest uppercase">SWEEP-AZIMUTH: <span class="text-on-surface" id="radar-angle">042.8Â°</span></div>
+<div class="text-on-surface-variant">RANGE: <span class="text-secondary">SURFACE TO DMZ-EXT</span></div>
+<div class="text-on-surface-variant">VELOCITY: <span class="text-error font-bold" id="radar-velocity">482 kpps</span></div>
+<div class="text-on-surface-variant">RADAR HARMONICS: <span class="text-secondary-fixed">Q-BAND 38.4 GHz</span></div>
+</div>
+
+<div class="absolute top-space-md right-space-md bg-surface-container/90 p-space-sm font-label-sm text-label-sm flex flex-col gap-space-xs backdrop-blur pointer-events-none">
+<span class="text-on-surface-variant uppercase font-bold border-b border-surface-container-highest pb-space-xs">SIGNAL CLASSIFIER</span>
+<div class="flex items-center gap-space-xs"><span class="w-2.5 h-2.5 bg-error inline-block"></span><span class="text-error font-semibold">CRITICAL INTRUSION (DDoS/Exfil)</span></div>
+<div class="flex items-center gap-space-xs"><span class="w-2.5 h-2.5 bg-primary-container inline-block"></span><span class="text-primary-container font-semibold">ELEVATED (PortScan/SYN Sweep)</span></div>
+<div class="flex items-center gap-space-xs"><span class="w-2.5 h-2.5 bg-outline-variant inline-block"></span><span class="text-surface-tint font-semibold">DEGRADED / BLINDSPOT</span></div>
+<div class="flex items-center gap-space-xs"><span class="w-2.5 h-2.5 bg-secondary inline-block"></span><span class="text-secondary font-semibold">NOMINAL MIRROR FLOW</span></div>
+</div>
+
+<div class="absolute bottom-space-md left-space-md right-space-md flex items-center justify-between font-label-sm text-label-sm pointer-events-none">
+<span class="bg-surface-container/80 px-space-sm py-space-xs text-on-surface-variant">CTR: LAT 37.7749Â° N, LON 122.4194Â° W [CLUSTER-US-WEST]</span>
+<span class="bg-surface-container/80 px-space-sm py-space-xs text-secondary" id="radar-bearing">BEARING LOCK: -- [AZ --Â° | MAG --]</span>
+</div>
+</div>
+
+<!-- Radar Stats -->
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-space-xs font-label-sm text-label-sm">
+<div class="bg-surface-container p-space-sm flex flex-col justify-between">
+<span class="text-on-surface-variant">ACTIVE CONTACTS</span>
+<span class="font-headline-sm text-headline-sm text-on-surface font-bold" id="stat-contacts">0 VECTORS</span>
+</div>
+<div class="bg-surface-container p-space-sm flex flex-col justify-between">
+<span class="text-on-surface-variant">COLLISION PROB</span>
+<span class="font-headline-sm text-headline-sm text-error font-bold" id="stat-collision">-- CRIT</span>
+</div>
+<div class="bg-surface-container p-space-sm flex flex-col justify-between">
+<span class="text-on-surface-variant">INGRESS BANDWIDTH</span>
+<span class="font-headline-sm text-headline-sm text-primary-container font-bold" id="stat-bandwidth">-- Gbps</span>
+</div>
+<div class="bg-surface-container p-space-sm flex flex-col justify-between">
+<span class="text-on-surface-variant">BLOOM HARD-HITS</span>
+<span class="font-headline-sm text-headline-sm text-secondary font-bold" id="stat-bloom-hits">0 MATCHES</span>
+</div>
+</div>
+</div>
+
+<!-- KILL-CHAIN MATRIX -->
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-sm">
+<span class="material-symbols-outlined text-primary text-[18px]">account_tree</span>
+<span class="font-label-md text-label-md uppercase font-bold text-on-surface tracking-wider">TACTICAL KILL-CHAIN PHASE MATRIX (LIVE SENSORS)</span>
+</div>
+<span class="font-label-sm text-label-sm text-on-surface-variant">DISCRETE STATE EVALUATION</span>
+</div>
+<div class="grid grid-cols-2 md:grid-cols-7 gap-space-xs font-label-sm text-label-sm">
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">01 // RECON</span>
+<span class="px-space-xs py-space-xs bg-primary-container/20 text-primary-container font-bold uppercase text-center">TRIPPED</span>
+<span class="text-[10px] text-on-surface-variant text-center">T1595.001 (PORT)</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">02 // WEAPONIZE</span>
+<span class="px-space-xs py-space-xs bg-surface-container-highest text-on-surface-variant font-medium uppercase text-center">PASSIVE</span>
+<span class="text-[10px] text-on-surface-variant text-center">EXT-BLIND</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">03 // DELIVERY</span>
+<span class="px-space-xs py-space-xs bg-error-container/40 text-error font-bold uppercase text-center">BREACHED</span>
+<span class="text-[10px] text-on-surface-variant text-center">T1190 SYN-FLD</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">04 // EXPLOIT</span>
+<span class="px-space-xs py-space-xs bg-error-container/40 text-error font-bold uppercase text-center">ELEVATED</span>
+<span class="text-[10px] text-on-surface-variant text-center">CVE-2024-3400</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">05 // INSTALL</span>
+<span class="px-space-xs py-space-xs bg-outline-variant/30 text-surface-tint font-bold uppercase text-center">SUSPECTED</span>
+<span class="text-[10px] text-on-surface-variant text-center">BLINDSPOT (0%)</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">06 // C2 CALL</span>
+<span class="px-space-xs py-space-xs bg-error text-on-error font-bold uppercase text-center">INTERCEPT</span>
+<span class="text-[10px] text-on-surface-variant text-center">BLOOM MATCH</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col gap-space-xs">
+<span class="text-on-surface-variant text-[10px]">07 // EXFIL</span>
+<span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold uppercase text-center">BLOCKED</span>
+<span class="text-[10px] text-on-surface-variant text-center">EGRESS SHUNT</span>
+</div>
+</div>
+</div>
+</div>
+
+<!-- RIGHT: INCIDENT STREAM -->
+<div class="xl:col-span-5 2xl:col-span-4 flex flex-col gap-space-md min-w-0">
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-error text-[18px]">stream</span>
+<span class="font-label-md text-label-md uppercase font-bold text-on-surface tracking-wider">LIVE TELEMETRY STREAM & BLOOM MATCHES</span>
+</div>
+<span class="px-space-xs py-space-xs bg-error-container text-on-error font-label-sm text-label-sm font-bold animate-pulse">LIVE FEED</span>
+</div>
+
+<div class="flex items-center gap-space-xs bg-surface-container-lowest p-space-xs">
+<span class="material-symbols-outlined text-on-surface-variant text-[16px] pl-space-xs">search</span>
+<input class="bg-transparent w-full text-on-surface font-label-sm text-label-sm focus:outline-none placeholder:text-on-surface-variant/50 uppercase" id="stream-filter-input" placeholder="FILTER TARGET IP / PROTOCOL / ASN [/]" type="text"/>
+<span class="text-on-surface-variant text-[10px] font-label-sm px-space-xs bg-surface-container">CTRL+/</span>
+</div>
+
+<!-- TELEMETRY STREAM LIST -->
+<div class="flex flex-col gap-space-xs max-h-[440px] overflow-y-auto" id="incident-stream">
+<div class="text-center py-space-lg text-on-surface-variant font-label-sm text-label-sm">
+Connecting to live stream...
+</div>
+</div>
+</div>
+
+<!-- FORENSIC DRAWER -->
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm" id="forensic-drawer">
+<div class="flex items-center justify-between bg-surface-container-lowest p-space-xs">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-primary text-[16px]">data_object</span>
+<span class="font-label-md text-label-md uppercase font-bold text-primary">FORENSIC TELEMETRY: <span class="text-on-surface" id="drawer-ip">Select incident</span></span>
+</div>
+<button class="text-on-surface-variant hover:text-on-surface px-space-xs font-label-sm text-label-sm" id="btn-close-drawer" type="button">
+            [ESC] CLOSE
+          </button>
+</div>
+
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-space-xs font-label-sm text-label-sm">
+<div class="bg-surface-container p-space-xs flex flex-col">
+<span class="text-on-surface-variant text-[10px]">DANGER INDEX</span>
+<span class="text-headline-sm font-headline-sm text-error font-bold" id="drawer-danger">98.4 / 100</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col">
+<span class="text-on-surface-variant text-[10px]">PAGERANK</span>
+<span class="text-headline-sm font-headline-sm text-primary-container font-bold" id="drawer-pagerank">0.084</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col">
+<span class="text-on-surface-variant text-[10px]">GRAPH DEGREE</span>
+<span class="text-headline-sm font-headline-sm text-secondary font-bold" id="drawer-degree">38 EDGES</span>
+</div>
+<div class="bg-surface-container p-space-xs flex flex-col">
+<span class="text-on-surface-variant text-[10px]">COMMUNITY</span>
+<span class="text-headline-sm font-headline-sm text-on-surface font-bold" id="drawer-comm">Cluster-Î“</span>
+</div>
+</div>
+
+<div class="bg-surface-container-lowest p-space-sm font-label-sm text-label-sm flex flex-col gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="text-on-surface-variant uppercase font-semibold">BLOOM FILTER PRE-FILTER DETERMINISM</span>
+<span class="text-secondary font-bold" id="drawer-bloom-status">STATUS: EXACT MATCH</span>
+</div>
+<div class="text-[11px] text-on-surface font-label-md break-all bg-surface-container p-space-xs" id="drawer-bloom-hash">
+            HASH(K1..K5): [0x4FF81, 0x82A10, 0x110C3, 0x098F2, 0xEE419] â€¢ 0.001% COLLISION EST.
+          </div>
+</div>
+
+<div class="bg-surface-container-lowest p-space-sm flex flex-col gap-space-xs font-label-sm text-label-sm">
+<div class="flex items-center justify-between text-[11px]">
+<span class="text-on-surface-variant uppercase font-semibold">RAW PCAP PACKET HEADER [FIRST 64 BYTES]</span>
+<span class="text-primary" id="drawer-packet-type">TCP SYN FLOOD [FLAGS: 0x002]</span>
+</div>
+<pre class="bg-surface-container p-space-xs text-[10px] font-label-sm text-secondary overflow-x-auto select-all leading-tight" id="drawer-hex-dump">0000:  45 00 00 3c 1a 2b 40 00  40 06 b2 e4 c6 33 64 2c  E..<.@.@....3d,
+0010:  0a 00 01 0a d4 31 00 50  7a 91 f0 18 00 00 00 00  .....1.Pz.......
+0020:  a0 02 72 10 c3 40 00 00  02 04 05 b4 04 02 08 0a  ..r..@..........
+0030:  3d 89 2a 11 00 00 00 00  01 03 03 07 00 00 00 00  =.*.............</pre>
+</div>
+
+<div class="flex items-center gap-space-xs font-label-sm text-label-sm">
+<button class="w-1/2 py-space-xs bg-error text-on-error font-bold uppercase hover:bg-error-container hover:text-on-error-container transition-colors" type="button">
+            BLACKHOLE ROUTE (BGP)
+          </button>
+<button class="w-1/2 py-space-xs bg-primary-container text-on-primary-container font-bold uppercase hover:bg-primary hover:text-on-primary transition-colors" type="button">
+            ADD TO PERMANENT C2 BLOOM
+          </button>
+</div>
+</div>
+</div>
+
+</main>
+
+<!-- BOTTOM: HONEST ML EVALUATION -->
+<section class="w-full px-margin pb-space-lg">
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm">
+<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-xs border-b border-outline-variant/30 pb-space-xs">
+<div class="flex items-center gap-space-sm">
+<span class="material-symbols-outlined text-primary text-[18px]">assessment</span>
+<span class="font-label-md text-label-md uppercase font-bold text-on-surface tracking-wider">
+            SUBSYSTEM BENCHMARK & HONEST ML EVALUATION [STRICT PRODUCTION GROUND-TRUTH]
+          </span>
+</div>
+<div class="flex items-center gap-space-md font-label-sm text-label-sm text-on-surface-variant">
+<span>SAMPLE WINDOW: LAST 10,000,000 PACKETS</span>
+<span class="text-primary font-bold">UNBIASED TEST DATASET: DEFCON-34-LIVE</span>
+</div>
+</div>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-space-xs font-label-sm text-label-sm">
+<!-- DDoS -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-on-surface">DDoS DETECTOR</span>
+<span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold text-[10px]">OPTIMAL</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.8%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface">0.02%</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-secondary h-full" style="width: 99.8%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-on-surface-variant">Status: ACTIVE - HIGH CONFIDENCE</span>
+</div>
+
+<!-- PortScan -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-on-surface">PORTSCAN DETECTOR</span>
+<span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold text-[10px]">OPTIMAL</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.1%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface">0.14%</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-secondary h-full" style="width: 99.1%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-on-surface-variant">Status: ACTIVE - TCP/UDP CALIBRATED</span>
+</div>
+
+<!-- Slowhttptest -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-on-surface">SLOWHTTPTEST</span>
+<span class="px-space-xs py-space-xs bg-primary-container/20 text-primary-container font-bold text-[10px]">MARGINAL</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-primary-container font-bold">45.2%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-error">8.40%</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-primary-container h-full" style="width: 45.2%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-primary-container">Status: HUMAN VERIFICATION REQ</span>
+</div>
+
+<!-- Bot -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-on-surface">BOT CLUSTER ML</span>
+<span class="px-space-xs py-space-xs bg-outline-variant/40 text-surface-tint font-bold text-[10px]">DEGRADED</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">65.3%</span></span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-error">28.10%</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-outline-variant h-full" style="width: 2%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-surface-tint font-semibold">Status: TIER-1+2 ACTIVE</span>
+</div>
+
+<!-- Infiltration -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-on-surface">INFILTRATION</span>
+<span class="px-space-xs py-space-xs bg-error-container text-on-error font-bold text-[10px]">FAILED / BLIND</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">69.0%</span></span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface-variant">Tier-3 Rules</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-error h-full" style="width: 0%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-error font-bold">Status: SIGNATURE ZERO-DAY GAP</span>
+</div>
+
+<!-- Bloom -->
+<div class="bg-surface-container p-space-sm flex flex-col justify-between gap-space-xs">
+<div class="flex items-center justify-between">
+<span class="font-label-md text-label-md font-bold text-secondary">BLOOM PRE-FILTER</span>
+<span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold text-[10px]">DETERMINISTIC</span>
+</div>
+<div class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">C2 MATCH:</span><span class="text-secondary font-bold">100.0%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">LATENCY:</span><span class="text-secondary-fixed font-bold">0.12 Î¼s</span></div>
+<div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
+<div class="bg-secondary-fixed h-full" style="width: 100%;"></div>
+</div>
+</div>
+<span class="text-[10px] text-on-surface-variant">COLLISION: 0.001% (OPTIMAL)</span>
+</div>
+</div>
+
+<!-- KEYBOARD SHORTCUTS -->
+<div class="flex flex-wrap items-center justify-between gap-space-xs pt-space-xs text-on-surface-variant font-label-sm text-label-sm">
+<div class="flex items-center gap-space-md flex-wrap">
+<span class="text-on-surface font-bold">SOC KEYBOARD CONTROL:</span>
+<span><kbd class="px-space-xs bg-surface-container text-on-surface">[1-3]</kbd> Switch Mode</span>
+<span><kbd class="px-space-xs bg-surface-container text-on-surface">[SPACE]</kbd> Freeze Sweep</span>
+<span><kbd class="px-space-xs bg-surface-container text-on-surface">[K]</kbd> Killstream</span>
+<span><kbd class="px-space-xs bg-surface-container text-on-surface">[/]</kbd> Quick Filter</span>
+<span><kbd class="px-space-xs bg-surface-container text-on-surface">[ESC]</kbd> Clear/Close</span>
+</div>
+<div>
+<span class="text-secondary">INTEGRITY: MIL-STD-498 VERIFIED // SEC-OP LEVEL 4</span>
+</div>
+</div>
+</div>
+</section>
+
+</div></main><footer class="w-full bg-surface-container-lowest border-t border-outline-variant/30 py-space-md"><div class="w-full px-margin flex flex-col md:flex-row items-center justify-between gap-space-sm font-label-sm text-label-sm text-on-surface-variant"><div><span>TACTICAL PROTOCOL: DEFCON-4 // THREVIA DEFENSE MATRIX // STRICT CLASSIFIED WORKSPACE</span></div><div class="flex items-center gap-space-lg"><span id="sys-epoch">SYS-EPOCH: --</span><span>PACKET-DROP: 0.00018%</span><span class="text-primary">STATION RESTRICTED</span></div></div></footer>
+
+<!-- Load app.js -->
+<script src="/static/app.js?v=3"></script>
+
+</body></html>
+

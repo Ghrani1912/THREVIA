@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THREVIA - Real-Time Alerts</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0e0f;
+            color: #00ff88;
+            font-family: 'Courier New', monospace;
+            padding: 20px;
+        }
+        .header {
+            border: 2px solid #00ff88;
+            padding: 20px;
+            margin-bottom: 20px;
+            background: #0f1416;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #0f1416;
+            border: 1px solid #00ff88;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 36px;
+            font-weight: bold;
+            color: #ffaa00;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #00ff88;
+            margin-top: 5px;
+        }
+        .alerts-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #0f1416;
+        }
+        .alerts-table th {
+            background: #162020;
+            color: #00ff88;
+            padding: 10px;
+            text-align: left;
+            border: 1px solid #00ff88;
+        }
+        .alerts-table td {
+            padding: 8px;
+            border: 1px solid #333;
+            color: #aaa;
+        }
+        .alerts-table tr:hover {
+            background: #1a2020;
+        }
+        .critical { color: #ff3344 !important; font-weight: bold; }
+        .status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .error { color: #ff3344; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span class="status"></span> THREVIA PHASE 4 - REAL-TIME DETECTION</h1>
+        <p>Streaming from MongoDB | Auto-refresh: 3 seconds | <span id="timestamp">--</span></p>
+    </div>
+
+    <div class="stats">
+        <div class="stat-card">
+            <div class="stat-value" id="total-count">--</div>
+            <div class="stat-label">TOTAL ALERTS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="spike-count">--</div>
+            <div class="stat-label">SPIKE ALERTS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="ml-count">--</div>
+            <div class="stat-label">ML ALERTS</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="bloom-count">--</div>
+            <div class="stat-label">BLOOM HITS</div>
+        </div>
+    </div>
+
+    <h2>RECENT ALERTS (Last 20)</h2>
+    <table class="alerts-table">
+        <thead>
+            <tr>
+                <th>TIME</th>
+                <th>SOURCE IP</th>
+                <th>TYPE</th>
+                <th>CONNECTIONS</th>
+                <th>SEVERITY</th>
+                <th>DETAILS</th>
+            </tr>
+        </thead>
+        <tbody id="alerts-body">
+            <tr><td colspan="6" style="text-align:center;">Loading alerts...</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        const DOCKER_MONGO_PROXY = 'http://localhost:8888';  // We'll create this
+
+        async function fetchRealTimeData() {
+            try {
+                // For now, show instructions
+                document.getElementById('total-count').textContent = '?';
+                document.getElementById('spike-count').textContent = '?';
+                document.getElementById('ml-count').textContent = '?';
+                document.getElementById('bloom-count').textContent = '?';
+                document.getElementById('timestamp').textContent = new Date().toLocaleTimeString();
+                
+                document.getElementById('alerts-body').innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align:center; padding:20px;">
+                            <span class="error">⚠ MongoDB Connection Issue</span><br><br>
+                            Your Windows has a local MongoDB running that conflicts with Docker MongoDB.<br><br>
+                            <strong>To see real-time data:</strong><br>
+                            1. Open PowerShell as Administrator<br>
+                            2. Run: <code>net stop MongoDB</code><br>
+                            3. Refresh this page<br><br>
+                            OR run this command to see real data:<br>
+                            <code>docker exec threvia-mongodb mongosh threvia --quiet --eval "db.stream_alerts.countDocuments()"</code>
+                        </td>
+                    </tr>
+                `;
+                
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        // Initial load
+        fetchRealTimeData();
+        
+        // Refresh every 3 seconds
+        setInterval(fetchRealTimeData, 3000);
+    </script>
+</body>
+</html>

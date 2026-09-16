@@ -1,14 +1,15 @@
-"""
+﻿"""
 Phase 4 — Alert Writer
 =======================
 Writes streaming alerts and Bloom Filter hits to MongoDB so the Phase 6
 dashboard can read them.
 
 Collections written:
-  - threvia.stream_alerts    : windowed spike alerts from the streaming detector
-  - threvia.bloom_hits       : per-row Bloom Filter flagged events
+  - threvia.stream_alerts  : windowed spike alerts from the streaming detector
+  - threvia.bloom_hits     : per-row Bloom Filter flagged events
+  - threvia.ml_alerts      : per-flow ML-scored alerts (Pipeline C)
 
-Both collections are time-indexed for efficient dashboard queries.
+All collections are time-indexed for efficient dashboard queries.
 
 Dependencies: pymongo
 """
@@ -24,12 +25,13 @@ from pymongo import MongoClient, ASCENDING, errors
 
 logger = logging.getLogger(__name__)
 
-# ── Config (override via environment variables) ────────────────────────────────
+# ── Config (override via environment variables) ─────────────────────────────
 _MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-_DB_NAME = os.getenv("MONGO_DB", "threvia")
+_DB_NAME   = os.getenv("MONGO_DB", "threvia")
 
 _COL_ALERTS = "stream_alerts"
-_COL_BLOOM = "bloom_hits"
+_COL_BLOOM  = "bloom_hits"
+_COL_ML     = "ml_alerts"
 
 
 class AlertWriter:
@@ -45,12 +47,12 @@ class AlertWriter:
         mongo_uri: str = _MONGO_URI,
         db_name: str = _DB_NAME,
     ):
-        self._uri = mongo_uri
-        self._db_name = db_name
+        self._uri      = mongo_uri
+        self._db_name  = db_name
         self._client: MongoClient | None = None
         self._db = None
 
-    # ── Connection ─────────────────────────────────────────────────────────────
+    # ── Connection ──────────────────────────────────────────────────────────
 
     def connect(self) -> None:
         """Open connection and ensure indexes exist."""
@@ -74,7 +76,7 @@ class AlertWriter:
     def __exit__(self, *_) -> None:
         self.close()
 
-    # ── Write API ──────────────────────────────────────────────────────────────
+    # ── Write API ───────────────────────────────────────────────────────────
 
     def write_spike_alert(
         self,
@@ -88,19 +90,18 @@ class AlertWriter:
     ) -> str:
         """
         Persist a windowed spike alert.
-
         Returns the inserted document id as a string.
         """
         doc: dict[str, Any] = {
-            "type": "spike_alert",
-            "src_ip": src_ip,
-            "window_start": window_start,
-            "window_end": window_end,
+            "type":             "spike_alert",
+            "src_ip":           src_ip,
+            "window_start":     window_start,
+            "window_end":       window_end,
             "connection_count": connection_count,
-            "total_bytes": total_bytes,
-            "attack_label": attack_label,
-            "severity": severity,
-            "created_at": datetime.now(timezone.utc),
+            "total_bytes":      total_bytes,
+            "attack_label":     attack_label,
+            "severity":         severity,
+            "created_at":       datetime.now(timezone.utc),
         }
         result = self._col(_COL_ALERTS).insert_one(doc)
         logger.debug("Spike alert written: %s  ip=%s  count=%d  severity=%s",
@@ -121,13 +122,13 @@ class AlertWriter:
         Persist a single Bloom Filter hit (a row whose src_ip was flagged).
         """
         doc: dict[str, Any] = {
-            "type": "bloom_hit",
-            "src_ip": src_ip,
-            "dst_ip": dst_ip,
-            "proto": proto,
-            "service": service,
+            "type":       "bloom_hit",
+            "src_ip":     src_ip,
+            "dst_ip":     dst_ip,
+            "proto":      proto,
+            "service":    service,
             "attack_cat": attack_cat,
-            "label": label,
+            "label":      label,
             "event_time": event_time,
             "created_at": datetime.now(timezone.utc),
         }
@@ -137,7 +138,7 @@ class AlertWriter:
 
     def write_bloom_hits_bulk(self, hits: list[dict]) -> int:
         """
-        Bulk-insert a list of Bloom hit dicts (as returned by the streaming job).
+        Bulk-insert a list of Bloom hit dicts.
         Returns the number of documents inserted.
         """
         if not hits:
@@ -165,7 +166,30 @@ class AlertWriter:
         logger.info("Bulk spike alerts inserted: %d", len(result.inserted_ids))
         return len(result.inserted_ids)
 
-    # ── Query helpers (used by the dashboard) ──────────────────────────────────
+    def write_ml_alerts_bulk(self, alerts: list[dict]) -> int:
+        """
+        Bulk-insert ML-scored flow alerts (Pipeline C output).
+
+        Each dict should contain:
+            src_ip, dst_ip, proto, dst_port, event_time  -- identity fields
+            p_attack     float   RF binary P(attack)
+            attack_type  str     RF multiclass predicted label
+            p_bot        float   RF bot-binary P(bot)
+            cluster_id   int     KMeans cluster assignment
+            severity     str     Critical / High / Medium
+        Returns the number of documents inserted.
+        """
+        if not alerts:
+            return 0
+        now = datetime.now(timezone.utc)
+        for doc in alerts:
+            doc.setdefault("type", "ml_alert")
+            doc.setdefault("created_at", now)
+        result = self._col(_COL_ML).insert_many(alerts)
+        logger.info("ML alerts inserted: %d", len(result.inserted_ids))
+        return len(result.inserted_ids)
+
+    # ── Query helpers (used by the dashboard) ───────────────────────────────
 
     def get_recent_alerts(self, limit: int = 100) -> list[dict]:
         """Return the most recent spike alerts (newest first)."""
@@ -187,6 +211,16 @@ class AlertWriter:
         )
         return list(cursor)
 
+    def get_recent_ml_alerts(self, limit: int = 100) -> list[dict]:
+        """Return the most recent ML-scored alerts (newest first)."""
+        cursor = (
+            self._col(_COL_ML)
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+        return list(cursor)
+
     def count_alerts_by_severity(self) -> dict[str, int]:
         """Aggregate spike alert counts by severity (for dashboard widgets)."""
         pipeline = [
@@ -194,6 +228,14 @@ class AlertWriter:
             {"$sort": {"count": -1}},
         ]
         return {d["_id"]: d["count"] for d in self._col(_COL_ALERTS).aggregate(pipeline)}
+
+    def count_ml_alerts_by_type(self) -> dict[str, int]:
+        """Aggregate ML alert counts by predicted attack type."""
+        pipeline = [
+            {"$group": {"_id": "$attack_type", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+        return {d["_id"]: d["count"] for d in self._col(_COL_ML).aggregate(pipeline)}
 
     def count_bloom_hits_by_ip(self, top_n: int = 20) -> list[dict]:
         """Return top N attacker IPs by Bloom hit frequency."""
@@ -205,7 +247,7 @@ class AlertWriter:
         ]
         return list(self._col(_COL_BLOOM).aggregate(pipeline))
 
-    # ── Internals ──────────────────────────────────────────────────────────────
+    # ── Internals ───────────────────────────────────────────────────────────
 
     def _col(self, name: str):
         if self._db is None:
@@ -224,11 +266,21 @@ class AlertWriter:
             self._db[_COL_BLOOM].create_index(
                 [("src_ip", ASCENDING)], background=True
             )
+            # ml_alerts indexes
+            self._db[_COL_ML].create_index(
+                [("created_at", ASCENDING)], background=True
+            )
+            self._db[_COL_ML].create_index(
+                [("src_ip", ASCENDING)], background=True
+            )
+            self._db[_COL_ML].create_index(
+                [("attack_type", ASCENDING)], background=True
+            )
         except errors.PyMongoError as exc:
             logger.warning("Index creation warning: %s", exc)
 
 
-# ── Standalone test ────────────────────────────────────────────────────────────
+# ── Standalone test ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -258,7 +310,18 @@ if __name__ == "__main__":
         )
         print(f"Test bloom hit inserted: {bloom_id}")
 
+        # Write a test ml alert
+        ml_id = aw.write_ml_alerts_bulk([{
+            "src_ip": "10.0.0.1", "dst_ip": "192.168.1.5",
+            "proto": "TCP", "dst_port": 80,
+            "p_attack": 0.91, "attack_type": "DDoS",
+            "p_bot": 0.12, "cluster_id": 3,
+            "severity": "High", "event_time": "2026-09-06 10:00:10",
+        }])
+        print(f"Test ML alert inserted: {ml_id} docs")
+
         # Query back
         print("\nRecent alerts:", aw.get_recent_alerts(limit=2))
         print("Severity counts:", aw.count_alerts_by_severity())
+        print("ML alert types:", aw.count_ml_alerts_by_type())
         print("Top IPs:", aw.count_bloom_hits_by_ip(top_n=5))

@@ -157,7 +157,7 @@ services:
     image: mongo:6
     container_name: threvia-mongodb
     ports:
-      - "27017:27017"
+      - "27018:27017"  # Expose on host port 27018 to avoid conflict with local MongoDB
     environment:
       MONGO_INITDB_DATABASE: threvia
     volumes:

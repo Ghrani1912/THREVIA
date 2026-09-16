@@ -105,7 +105,9 @@ def per_class(preds, label_col, label_map, spark):
 
 
 def prep_external(spark, df, feat_cols, pipe_model, label_udf, idx_model):
-    """Rename + clean + scale + encode an external CSV dataframe."""
+    """Rename + clean + log1p + scale + encode an external CSV dataframe.
+    MUST mirror the clean_features() transform in merge_corpus.py exactly.
+    """
     # strip col name whitespace
     for c in df.columns:
         sc = c.strip()
@@ -128,6 +130,17 @@ def prep_external(spark, df, feat_cols, pipe_model, label_udf, idx_model):
     null_cols = [c for c in feat_cols if df.filter(F.col(c).isNull()).count() > 0]
     if null_cols:
         df = df.fillna(0.0, subset=null_cols)
+
+    # ── log1p transform (must match merge_corpus.py) ──────────────────────────
+    DURATION_FLOOR = 1.0
+    if 'Flow Duration' in feat_cols:
+        df = df.withColumn(
+            'Flow Duration',
+            F.log1p(F.greatest(F.col('Flow Duration'), F.lit(DURATION_FLOOR)))
+        )
+    for c in ['Flow Bytes/s', 'Flow Packets/s']:
+        if c in feat_cols:
+            df = df.withColumn(c, F.log1p(F.greatest(F.col(c), F.lit(0.0))))
 
     df = df.withColumn(LABEL_COL, label_udf(F.col(LABEL_COL)))
     df = df.filter(F.col(LABEL_COL).isNotNull() & (F.trim(F.col(LABEL_COL)) != ''))
@@ -166,8 +179,10 @@ def main():
     label_map = {i: v for i, v in enumerate(idx_model.labels)}
     print(f'  Classes ({len(label_map)}): {label_map}')
 
-    # Fit external scaler on 10% sample (same as training)
-    sample = train.sample(0.10, seed=42)
+    # Fit external scaler on 10% sample.
+    # Drop the existing scaled_features col (already in parquet) before fitting
+    # to avoid "column already exists" error.
+    sample = train.sample(0.10, seed=42).drop('raw_features', FEAT_COL)
     ext_pipe = Pipeline(stages=[
         VectorAssembler(inputCols=FEAT_COLS, outputCol='_raw_f', handleInvalid='keep'),
         StandardScaler(inputCol='_raw_f', outputCol=FEAT_COL,
@@ -272,7 +287,7 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     # COMPARISON TABLE
     # ══════════════════════════════════════════════════════════════════════════
-    sep('COMPARISON: Clean Corpus vs Old CIC-2017 Baseline')
+    sep('COMPARISON: Clean Corpus v2 (log1p) vs Old CIC-2017 Baseline')
     print(f"""
   BINARY (is_attack 0/1)
   ┌──────────────────────────┬──────────┬──────────┬──────────┬─────────────────┐
