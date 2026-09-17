@@ -840,3 +840,133 @@ T=0.65 was chosen as the production setting because:
 > not the threshold. Further improvement requires retraining with capped weights (max 100×)
 > to reduce boundary pull from extreme rare-class weights (Sql Injection: 22,420×).
 > That retrain is the recommended **next step** for v1.1.
+
+---
+
+## RUNTIME POLICY FIX — Why the Pipeline Still Produced Excess Alerts (September 16, 2026)
+
+### The headline finding
+
+**The T=0.65 tuning was measured in evaluation scripts and never reached the model that runs in
+production.** The live detector (`backend/realtime/streaming_detector.py`) had its own hardcoded
+threshold, and three further defects sat on top of it. Fixing the model was necessary but was not
+sufficient: the pipeline was not running the model anyone had evaluated.
+
+### Defects found in the live path
+
+| # | Defect | Location (before) | Effect | Fix |
+|---|--------|-------------------|--------|-----|
+| 1 | `ML_THRESHOLD` defaulted to **0.25**, and the documented run command pinned it there — `export ML_THRESHOLD=0.25` in the TERM 2 launch line. Nothing in the repo overrode it, and 0.25 is *below* the untuned 0.50 baseline, so it was never a swept value. | `streaming_detector.py:67` | Ran the detector at the most FP-prone point available, on every batch. **Measured: 42.7% FPR, precision 54.7%** | Policy default is now the measured **0.65** (3.3% FPR), resolved from `thresholds.json` → env → defaults |
+| 2 | The Bot specialist's raw probability was **discarded** — the code kept only its hard `prediction` and stamped `attack_type = "Bot"` from it, with no way for anyone to see the score behind the verdict | `streaming_detector.py:228-237` | The Bot bucket was unaccountable: no `p_bot` was ever stored, so its precision could not be measured. It also meant its verdict could not be tuned, and it was checked before the multiclass/DDoS logic | `p_bot`, `p_bot_calibrated` and `bot_routed` are now persisted on every alert, and the cut is a documented, configurable value. **The cut itself was left at the measured optimum** — see the correction below |
+| 3 | `attack_type` derived from the stream's ground-truth `label` / `attack_cat` columns, and both persisted | `streaming_detector.py:241-248, 271-272` | Label leakage: per-attack-type FP breakdowns measured the **simulator's answer key**, not the classifier. A flow could be reported as `DDoS` without the model ever predicting DDoS | `attack_type` now comes from model output only (binary RF verdict, optional multiclass RF, calibrated Bot). Ground truth is retained solely as `ground_truth_*` for the CSV export and never consulted |
+| 4 | One MongoDB document **per false-positive flow**, no dedupe or rate limit | `alert_writer.py` `write_ml_alerts_bulk` | Alert *volume* was decoupled from alert *rate*: at the tuned 3.65% FPR, a single benign host still generated thousands of documents | `aggregate_ml_alerts` collapses to one document per `(src_ip, attack_type, severity)` with `flow_count`, `dst_ip_count`, `dst_ips`, `first_seen`/`last_seen`, `max_confidence`. Set `ML_ALERT_AGGREGATE=false` to restore per-flow rows |
+| 5 | `F.first("label")` labelled each window's verdict | `streaming_detector.py:374` | `first` returns an arbitrary row, not a majority — mixed windows were silently mislabelled in the spike stream | Replaced with `mode(label)` in the same single aggregation; the observed label is also tagged `label_source: "stream_ground_truth"` so it is not counted as a detection |
+
+### The Bot red herring — measured, not assumed (important correction)
+
+The dashboard previously showed `BOT CLUSTER ML — FPR 28.10%` next to DDoS 0.02% and PortScan 0.14%.
+The intuitive reading — that the 50/50-trained Bot specialist was miscalibrated and funnelling false
+positives into its own bucket — was implemented as a fix and then **refuted by measurement** on the
+corpus the simulator replays (`demo_balanced_150k_fixed`, measured both as a batch and end-to-end
+through the live streaming path):
+
+| rule | labelled Bot | truly Bot | precision | Bot recall |
+|------|--------------|-----------|-----------|-----------|
+| **unconditional raw 0.50 (the original behaviour)** | 947 | 905 | **95.56%** | **100.00%** |
+| gated at `P(attack) ≤ 0.80` ("Tier-2 as documented") | 48 | 48 | 100.00% | **5.30%** |
+| Bayesian prior correction at the measured 2.22% prevalence | 0 | 0 | — | **0%** |
+
+Two reasons the intuition fails:
+
+1. **Bot flows are flagged confidently.** They sit at high `P(attack)`, so gating the Bot
+   specialist on "binary RF unsure" excludes exactly the flows it exists to catch — 857 of 905 true
+   Bots were lost.
+2. **An RF probability is a tree-vote fraction, not a calibrated posterior.** Re-basing it onto
+   deployment odds via Bayes demands a raw score of 0.9778, which the model never emits, so the
+   correction silences the model entirely. The Bayes machinery remains available
+   (`detection_policy.calibrate_probability`, off by default) for any future model whose
+   probabilities have actually been calibrated.
+
+The real defects in the Bot path were **observability and attribution**: its probability was
+discarded (`p_bot` never persisted), so nobody could measure the bucket; and `attack_type` was
+labelled from ground truth before the Bot verdict was even consulted. Both are fixed. The measured
+truth about attribution: at T=0.65 the FP population lives in **Infiltration (980 of 980 labelled
+flows benign — 76% of all pipeline FPs)** and `Attack (unclassified)` (289/293 benign), while the Bot
+bucket held 500 flows of which 20 were benign (96% pure).
+
+The former 28.10% figure remains not reproducible from any artifact in this repository.
+
+### What changed, and what did not
+
+| | Before | After |
+|--|--|--|
+| Operating point | 0.25, pinned by the launch command | 0.65, from policy (file → env → defaults), re-derivable on demand |
+| Bot verdict | Hard `prediction`, probability discarded, unmeasurable | Raw 0.50 cut (measured optimum), `p_bot` persisted on every alert, cut configurable |
+| Alert labelling | Ground-truth columns | Model output only |
+| Documents per alert batch | 1:1 with FP flows | 1 per distinct `(src_ip, verdict)` with `flow_count` context |
+| Model **accuracy** | — | **Unchanged.** No model was retrained |
+
+**End-to-end verification (the streamed corpus, 60,000 staged flows, two detectors side by side):**
+
+| | T=0.25 (old launch) | T=0.65 (new policy) |
+|--|--|--|
+| Alert flows | 37,359 | 21,463 |
+| FP flows (truly BENIGN) | 16,893 | 1,289 |
+| **Pipeline FPR** | **42.73%** | **3.26%** |
+| Precision | 54.8% | 94.0% |
+| Bot bucket | 502 flows, 20 benign (96% pure) | 500 flows, 20 benign (96% pure) |
+| FP documents written | 16,891 | 1,289 |
+
+The batch replay over the full corpus (113,928 flows) agreed: 42.95% → 3.23% FPR, recall cost
+1.44 pp. Numbers this close from two independent paths (batch replay vs live streaming A/B) are the
+strongest available evidence the fix is real and not an artifact of the harness.
+
+**Aggregation changes alert volume, not FP rate.** Note that on this simulator benign source IPs are
+randomly generated per row (`stream_simulator._row_to_json`), so no two benign FPs share a `src_ip`
+and aggregation cannot collapse anything here — the document drop above comes entirely from the
+threshold. On real traffic, where a host emits many flows, the same aggregation will compound the
+gain.
+
+### Still outstanding — the actual model fix
+
+Defect 1's root cause is unchanged and remains the v1.1 work already identified above: the binary RF
+is trained with **unbounded inverse-frequency class weights** (`weight_i = N / (K x count_i)`) computed
+from the **multiclass** label distribution, giving Web Attack – Sql Injection a **22,420×** weight and
+XSS **9,663×**. The binary model's loss is therefore dominated by a handful of near-unique classes, and
+slow/sparse/long-duration BENIGN flows get pulled across the boundary with them. Threshold tuning buys
+9.21 pp of FPR; **capping weights at 100× is what removes the remaining 3.65%**.
+
+### How to re-derive the operating point
+
+```bash
+docker exec threvia-spark-master bash -c "export PYTHONPATH=/workspace && \
+  /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g \
+  /workspace/backend/ml/calibrate_thresholds.py --target-fpr 1.0"
+```
+
+`backend/ml/calibrate_thresholds.py` inverts the workflow: state the FPR analysts can absorb, and it
+returns the tightest threshold honouring it (`T* = quantile(1 - target_FPR)` over the BENIGN holdout —
+the lowest such cut, so attack recall is maximised). It also sweeps the Bot specialist's raw cut and
+writes `backend/realtime/thresholds.json`, which the detector loads. Run with `--target-fpr 3.65` to
+reproduce the shipped default exactly — the script independently reproduced the documented threshold
+table (0.50 → 12.87%, 0.65 → 3.65%, 0.75 → 0.99%), a useful cross-check that the measurement chain is
+sound.
+
+It warns when the chosen point costs more recall than `--min-recall` allows, and it refuses to raise
+the Bot cut above the default unless a candidate holds **both** a precision floor (`--bot-min-precision`,
+95%) and a recall floor (`--bot-min-recall`, 50%) — a precision-only rule would happily pick a cut that
+detects almost no Bots. Generated files are holdout-specific; keep or delete them deliberately.
+
+`backend/ml/measure_stream_fpr.py` is the other tool: it scores the exact corpus the simulator replays
+and prints the full FPR/recall/precision sweep plus the Bot cut table, so any future change can be
+argued from the same evidence.
+
+### Test coverage added
+
+| File | Purpose |
+|------|---------|
+| `backend/realtime/detection_policy.py` | The decision logic, extracted so it is testable without Spark |
+| `backend/realtime/test_detection_policy.py` | 25 tests — threshold resolution, prior calibration (and why it is off), Bot cut behaviour, anti-leakage, env/file precedence |
+| `backend/realtime/test_alert_aggregation.py` | 11 tests — collapse behaviour, capped samples, true distinct counts, malformed-input safety |
+
+Both suites run standalone (`python <file>`) or under pytest.

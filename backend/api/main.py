@@ -191,29 +191,48 @@ async def get_summary_metrics():
 async def get_recent_threats(limit: int = 100):
     """Get recent threat events from streaming pipeline"""
     try:
-        # Fetch spike alerts (most common currently)
+        # Per-collection quotas: ml_alerts arrive in ~100-doc bursts, so an
+        # unbalanced fetch lets one burst evict every other class from the
+        # newest-N window (the radar would show zero benign blips).
+        # Fetch a sample of nominal (benign) traffic so the radar can render
+        # baseline flows, not just alerts.
+        n_nominal = max(limit // 3, 10)
+        nominal = list(db.nominal_flows.aggregate([
+            {"$sort": {"created_at": -1}},
+            {"$limit": n_nominal},
+            {"$project": {"_id": 0}},
+        ])) if "nominal_flows" in db.list_collection_names() else []
+        n_spike = max((limit - n_nominal) // 4, 5)
         spike_alerts = list(db.stream_alerts.find(
             {},
             {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(limit))
-        
-        # Fetch ML alerts
-        ml_alerts = list(db.ml_alerts.find(
-            {},
-            {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(limit))
-        
-        # Fetch bloom hits
+        ).sort("created_at", DESCENDING).limit(n_spike))
         bloom_hits = list(db.bloom_hits.find(
             {},
             {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(limit))
+        ).sort("created_at", DESCENDING).limit(max(n_spike // 2, 3)))
+        n_ml = max(limit - n_nominal - n_spike - len(bloom_hits), 1)
+        ml_alerts = list(db.ml_alerts.find(
+            {},
+            {"_id": 0}
+        ).sort("created_at", DESCENDING).limit(n_ml))
         
-        # Combine all and sort by created_at
-        all_threats = spike_alerts + ml_alerts + bloom_hits
-        all_threats.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        # Combine. Do NOT re-sort by time and slice to `limit` here: ml_alerts
+        # are bulk-inserted in ~100-doc bursts sharing one timestamp while
+        # nominal flows trickle in continuously, so a time-ordered slice
+        # oscillates between all-alerts (just after a burst) and all-nominal
+        # (just before one). The per-class quotas above ARE the mix; return
+        # them all and let the newest-docs-per-class guarantee stand.
+        all_threats = spike_alerts + ml_alerts + bloom_hits + nominal
+        def _sort_key(x):
+            v = x.get("created_at")
+            if isinstance(v, datetime):
+                return (1, v.isoformat())
+            return (0, str(v) if v else "")
+        # Stable sort for display ordering only; every doc is returned.
+        all_threats.sort(key=_sort_key, reverse=True)
         
-        return {"threats": all_threats[:limit], "count": len(all_threats[:limit])}
+        return {"threats": all_threats, "count": len(all_threats)}
     except Exception as e:
         return {"error": str(e), "threats": []}
 

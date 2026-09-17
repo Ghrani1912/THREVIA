@@ -229,11 +229,16 @@ def _row_to_json(row: dict[str, Any]) -> str:
     
     dst_ip = f"{random.choice([192, 10, 172])}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
     
-    # Normalise identity columns used by existing pipelines
+    # Normalise identity columns used by existing pipelines.
+    # NOTE: capture the class BEFORE popping -- `record.pop("Label")` removes the
+    # key, so any later `record.get("Label")` silently falls back to "BENIGN".
+    # That bug shipped every attack flow with attack_cat="BENIGN", which is what
+    # made per-attack-type FP attribution on the stream untrustworthy.
+    true_label = str(record.get("Label", "BENIGN"))
     record["srcip"]      = record.pop("Source IP", src_ip)
     record["dstip"]      = record.pop("Destination IP", dst_ip)
     record["label"]      = str(record.pop("is_attack", record.pop("Label", "0")))
-    record["attack_cat"] = record.get("Label", "BENIGN")
+    record["attack_cat"] = true_label
     record["event_time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     return json.dumps(record)
 

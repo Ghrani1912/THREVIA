@@ -461,8 +461,8 @@ Connecting to live stream...
           </span>
 </div>
 <div class="flex items-center gap-space-md font-label-sm text-label-sm text-on-surface-variant">
-<span>SAMPLE WINDOW: LAST 10,000,000 PACKETS</span>
-<span class="text-primary font-bold">UNBIASED TEST DATASET: DEFCON-34-LIVE</span>
+<span title="These figures are a fixed evaluation, not live telemetry. Pipeline FPR was verified end-to-end on the streamed corpus (60,000 flows from demo_balanced_150k_fixed) at both operating points.">VERIFIED ON STREAMED CORPUS @ P(ATTACK) &gt;= 0.65</span>
+<span class="text-primary font-bold" title="42.73% at T=0.25 (the previous runtime value) vs 3.26% at T=0.65 — measured by running two detectors against the same 60,000 staged stream files. Re-measure with backend/ml/measure_stream_fpr.py.">PIPELINE FPR 3.26% (WAS 42.73% @ T=0.25)</span>
 </div>
 </div>
 
@@ -474,10 +474,10 @@ Connecting to live stream...
 <span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold text-[10px]">OPTIMAL</span>
 </div>
 <div class="flex flex-col gap-space-xs">
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.8%</span></div>
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface">0.02%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.86%</span></div>
+<div class="flex items-center justify-between" title="Pipeline-wide BENIGN false-positive rate, verified end-to-end on the streamed corpus at the current operating point. Per-detector FPR is not uniformly measured, so the pipeline figure is shown rather than an invented one."><span class="text-on-surface-variant">FPR (PIPELINE):</span><span class="text-on-surface">3.26%</span></div>
 <div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
-<div class="bg-secondary h-full" style="width: 99.8%;"></div>
+<div class="bg-secondary h-full" style="width: 99.86%;"></div>
 </div>
 </div>
 <span class="text-[10px] text-on-surface-variant">Status: ACTIVE - HIGH CONFIDENCE</span>
@@ -490,10 +490,10 @@ Connecting to live stream...
 <span class="px-space-xs py-space-xs bg-secondary/20 text-secondary font-bold text-[10px]">OPTIMAL</span>
 </div>
 <div class="flex flex-col gap-space-xs">
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.1%</span></div>
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface">0.14%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">99.91%</span></div>
+<div class="flex items-center justify-between" title="Pipeline-wide BENIGN false-positive rate, verified end-to-end on the streamed corpus at the current operating point. Per-detector FPR is not uniformly measured, so the pipeline figure is shown rather than an invented one."><span class="text-on-surface-variant">FPR (PIPELINE):</span><span class="text-on-surface">3.26%</span></div>
 <div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
-<div class="bg-secondary h-full" style="width: 99.1%;"></div>
+<div class="bg-secondary h-full" style="width: 99.91%;"></div>
 </div>
 </div>
 <span class="text-[10px] text-on-surface-variant">Status: ACTIVE - TCP/UDP CALIBRATED</span>
@@ -506,10 +506,10 @@ Connecting to live stream...
 <span class="px-space-xs py-space-xs bg-primary-container/20 text-primary-container font-bold text-[10px]">MARGINAL</span>
 </div>
 <div class="flex flex-col gap-space-xs">
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-primary-container font-bold">45.2%</span></div>
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-error">8.40%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-primary-container font-bold">44.75%</span></div>
+<div class="flex items-center justify-between" title="Pipeline-wide BENIGN false-positive rate, verified end-to-end on the streamed corpus at the current operating point. Per-detector FPR is not uniformly measured, so the pipeline figure is shown rather than an invented one."><span class="text-on-surface-variant">FPR (PIPELINE):</span><span class="text-on-surface">3.26%</span></div>
 <div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
-<div class="bg-primary-container h-full" style="width: 45.2%;"></div>
+<div class="bg-primary-container h-full" style="width: 44.75%;"></div>
 </div>
 </div>
 <span class="text-[10px] text-primary-container">Status: HUMAN VERIFICATION REQ</span>
@@ -522,13 +522,13 @@ Connecting to live stream...
 <span class="px-space-xs py-space-xs bg-outline-variant/40 text-surface-tint font-bold text-[10px]">DEGRADED</span>
 </div>
 <div class="flex flex-col gap-space-xs">
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">65.3%</span></span></div>
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-error">28.10%</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">65.3%</span></div>
+<div class="flex items-center justify-between" title="Measured: the Bot bucket held 500 flows of which 20 were truly BENIGN - 96.0% pure. The former 28.10% figure is not reproducible from any artifact in this repository; the Bot specialist was never a meaningful source of false positives."><span class="text-on-surface-variant">BUCKET FP:</span><span class="text-on-surface">4.0%</span></div>
 <div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
-<div class="bg-outline-variant h-full" style="width: 2%;"></div>
+<div class="bg-outline-variant h-full" style="width: 65.3%;"></div>
 </div>
 </div>
-<span class="text-[10px] text-surface-tint font-semibold">Status: TIER-1+2 ACTIVE</span>
+<span class="text-[10px] text-surface-tint font-semibold" title="Measured optimum: an unconditional raw rf_bot cut of 0.50 gives 95.56% precision at 100% Bot recall. Gating it on 'binary RF unsure' was measured to discard 857 of 905 true Bots, and a Bayesian prior correction to silence it entirely - both are off by default.">Status: TIER-2 ACTIVE - RAW CUT 0.50</span>
 </div>
 
 <!-- Infiltration -->
@@ -538,13 +538,13 @@ Connecting to live stream...
 <span class="px-space-xs py-space-xs bg-error-container text-on-error font-bold text-[10px]">FAILED / BLIND</span>
 </div>
 <div class="flex flex-col gap-space-xs">
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">69.0%</span></span></div>
-<div class="flex items-center justify-between"><span class="text-on-surface-variant">FPR:</span><span class="text-on-surface-variant">Tier-3 Rules</span></div>
+<div class="flex items-center justify-between"><span class="text-on-surface-variant">RECALL:</span><span class="text-secondary font-bold">69.0%</span></div>
+<div class="flex items-center justify-between" title="Measured: of 986 flows labelled Infiltration, 980 were truly BENIGN. That single bucket accounts for 2.48 of the 3.26 pp pipeline FPR - 76% of all false positives."><span class="text-on-surface-variant">BUCKET FP:</span><span class="text-error font-bold">99.4%</span></div>
 <div class="w-full bg-surface-container-lowest h-1.5 overflow-hidden">
 <div class="bg-error h-full" style="width: 0%;"></div>
 </div>
 </div>
-<span class="text-[10px] text-error font-bold">Status: SIGNATURE ZERO-DAY GAP</span>
+<span class="text-[10px] text-error font-bold" title="Actionable: this is where the remaining false positives live, not the Bot specialist.">Status: DOMINATES PIPELINE FPR (76% OF FPs)</span>
 </div>
 
 <!-- Bloom -->

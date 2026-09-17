@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""
+Tests for the Phase 4 detection policy.
+
+Runs two ways::
+
+    python backend/realtime/test_detection_policy.py     # standalone report
+    pytest backend/realtime/test_detection_policy.py -q  # CI
+
+Every assertion here maps to a specific false-positive defect found in the
+streaming detector.  The names say which.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import math
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from backend.realtime.detection_policy import (  # noqa: E402
+    DEFAULTS,
+    Thresholds,
+    calibrate_probability,
+    classify_flow,
+    load_thresholds,
+    logit,
+    severity_for,
+    should_alert,
+    sigmoid,
+)
+
+_ENV_KEYS = [
+    "THREVIA_THRESHOLDS",
+    "ML_THRESHOLD",
+    "BOT_THRESHOLD",
+    "BOT_TRAIN_PREVALENCE",
+    "BOT_DEPLOY_PREVALENCE",
+    "BOT_ROUTE_MAX_CONFIDENCE",
+]
+
+
+@contextlib.contextmanager
+def clean_env(**overrides: str):
+    """Run a block with the policy env vars cleared, then restored."""
+    saved = {k: os.environ.get(k) for k in _ENV_KEYS}
+    for k in _ENV_KEYS:
+        os.environ.pop(k, None)
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for k in _ENV_KEYS:
+            os.environ.pop(k, None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+# ── Probability helpers ────────────────────────────────────────────────────────
+
+
+def test_logit_sigmoid_roundtrip():
+    for p in (0.001, 0.01, 0.25, 0.5, 0.75, 0.99, 0.999):
+        assert abs(sigmoid(logit(p)) - p) < 1e-9
+
+
+def test_logit_is_finite_at_extremes():
+    # The old code called math.log(p / (1 - p)) directly, which raises on 0/1.
+    for p in (0.0, 1.0):
+        assert math.isfinite(logit(p))
+
+
+def test_calibrate_is_identity_when_prevalences_match():
+    for p in (0.1, 0.4, 0.5, 0.9):
+        assert abs(calibrate_probability(p, 0.2, 0.2) - p) < 1e-9
+
+
+def test_calibrate_balanced_model_at_low_prevalence():
+    # The exact correction the Bot specialist was missing: a 50/50 model's 0.50
+    # becomes 0.05 once the real positive rate is 5%.
+    assert abs(calibrate_probability(0.50, 0.50, 0.05) - 0.05) < 1e-9
+    # ...and it must climb back to 0.50 only at a raw score of 0.95.
+    assert abs(calibrate_probability(0.95, 0.50, 0.05) - 0.50) < 1e-9
+    assert calibrate_probability(0.90, 0.50, 0.05) < 0.35
+
+
+def test_calibrate_is_monotonic():
+    prev = -1.0
+    for i in range(51):
+        val = calibrate_probability(i / 50.0, 0.5, 0.01)
+        assert val >= prev - 1e-12, "calibration must not reorder scores"
+        prev = val
+
+
+# ── Threshold resolution ───────────────────────────────────────────────────────
+
+
+def test_default_attack_threshold_is_the_tuned_one():
+    """Regression: the live default used to be 0.25 — below the untuned 0.50."""
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent/thresholds.json"))
+    assert th.attack_threshold == DEFAULTS["attack_threshold"] == 0.65
+    assert th.attack_threshold > 0.50
+
+
+def test_ml_threshold_env_is_still_honoured():
+    """docker-compose / launch scripts set ML_THRESHOLD; that must still work."""
+    with clean_env(ML_THRESHOLD="0.72"):
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert th.attack_threshold == 0.72
+
+
+def test_thresholds_file_is_read_and_tolerates_bom_and_wrapper():
+    with clean_env():
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "thresholds.json"
+            cfg.write_text(
+                json.dumps({"thresholds": {"attack_threshold": 0.81, "bot_threshold": 0.6}}),
+                encoding="utf-8-sig",
+            )
+            th = load_thresholds(path=cfg)
+            assert th.attack_threshold == 0.81
+            assert th.bot_threshold == 0.6
+
+
+def test_malformed_thresholds_file_falls_back_instead_of_raising():
+    with clean_env():
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "thresholds.json"
+            cfg.write_text("{ this is not json", encoding="utf-8")
+            th = load_thresholds(path=cfg)
+    assert th.attack_threshold == DEFAULTS["attack_threshold"]
+    assert th.bot_threshold == DEFAULTS["bot_threshold"]
+
+
+def test_unknown_keys_in_config_are_ignored():
+    with clean_env():
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "thresholds.json"
+            cfg.write_text(json.dumps({"attack_threshold": 0.7, "nonsense": 1}), encoding="utf-8")
+            th = load_thresholds(path=cfg)
+    assert th.attack_threshold == 0.7
+
+
+def test_env_overriding_a_calibrated_file_is_loud_not_silent():
+    """
+    Silent env-beats-file drift is precisely how the live threshold ended up at
+    0.25.  Env still wins, but it must say so.
+    """
+    import logging
+
+    captured: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = _Capture()
+    policy_logger = logging.getLogger("backend.realtime.detection_policy")
+    policy_logger.addHandler(handler)
+    try:
+        with clean_env(ML_THRESHOLD="0.30"):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = Path(tmp) / "thresholds.json"
+                cfg.write_text(json.dumps({"attack_threshold": 0.90}), encoding="utf-8")
+                th = load_thresholds(path=cfg)
+    finally:
+        policy_logger.removeHandler(handler)
+
+    assert th.attack_threshold == 0.30           # env still wins
+    assert "ML_THRESHOLD" in th.source            # and the provenance records it
+    assert any("overrides the calibrated value" in m for m in captured), captured
+
+
+def test_bot_route_gating_can_be_enabled_by_env():
+    with clean_env(BOT_ROUTE_MAX_CONFIDENCE="0.80"):
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert th.bot_route_max_confidence == 0.80
+
+
+def test_bot_route_gating_accepts_none_as_explicitly_off():
+    with clean_env(BOT_ROUTE_MAX_CONFIDENCE="none"):
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert th.bot_route_max_confidence is None
+
+
+# ── The decision ───────────────────────────────────────────────────────────────
+
+
+def test_below_threshold_produces_no_alert():
+    assert should_alert(0.30) is False
+    assert classify_flow(0.30, 0.99) is None
+    assert classify_flow(0.6499, 0.99) is None  # just under the tuned cut
+
+
+def test_threshold_is_inclusive_and_malformed_scores_are_dropped():
+    assert should_alert(0.65) is True
+    assert classify_flow(0.65, None)["severity"] == "High"
+    assert classify_flow(None) is None
+    assert classify_flow("not-a-number") is None
+    assert classify_flow(float("nan")) is None
+
+
+def test_bot_defaults_are_the_measured_optimum_not_the_intuitive_fix():
+    """
+    Two plausible Bot "fixes" were implemented and then measured to be harmful
+    (backend/ml/measure_stream_fpr.py, demo_balanced_150k_fixed):
+
+      * prior correction at the observed 2.22% prevalence demands a raw rf_bot
+        score of 0.9778, which the model never emits -> 0 detections;
+      * Tier-2 gating on P(attack) <= 0.80 retains 48 of 905 true Bots -> 857
+        lost, because Bot flows are flagged *confidently*.
+
+    Both are therefore off by default.  The unconditional raw 0.50 cut measured
+    95.56% precision at 100% Bot recall and is what the defaults encode.
+    """
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert th.apply_prevalence_correction is False
+    assert th.bot_route_max_confidence is None      # ungated
+    assert th.bot_threshold == 0.50                 # raw, not corrected
+
+
+def test_raw_bot_score_0_50_labels_bot_by_default():
+    """The measured rule: a raw 0.50 IS a Bot verdict (95.56% precise)."""
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    out = classify_flow(0.70, 0.50, th)
+    assert out is not None
+    assert out["attack_type"] == "Bot"
+    assert out["p_bot_calibrated"] == 0.50
+    assert out["bot_routed"] is True
+
+
+def test_high_raw_bot_score_detects_bot():
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    out = classify_flow(0.70, 0.99, th)
+    assert out["attack_type"] == "Bot"
+    assert out["bot_routed"] is True
+    assert out["p_bot_calibrated"] >= th.bot_threshold
+
+
+def test_bot_verdict_still_requires_a_bot_score():
+    """Ungated must not mean unconditional: a low rf_bot score is not a Bot."""
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert classify_flow(0.70, 0.10, th)["attack_type"] != "Bot"
+    assert classify_flow(0.70, 0.49, th)["attack_type"] != "Bot"
+    assert classify_flow(0.70, None, th)["attack_type"] != "Bot"
+
+
+def test_gating_is_opt_in_and_then_protects_confident_verdicts():
+    """Gating is available for teams who prefer it, but it costs 95% of Bot recall."""
+    gated = Thresholds(bot_route_max_confidence=0.80)
+    # Inside the ambiguous band the Bot verdict still wins.
+    assert classify_flow(0.78, 0.99, gated)["attack_type"] == "Bot"
+    # Outside it, a confident verdict is no longer relabelled.
+    out = classify_flow(0.99, 0.999, gated, attack_type_hint="DDoS")
+    assert out["attack_type"] == "DDoS"
+    assert out["bot_routed"] is False
+    assert out["p_bot_calibrated"] is None
+
+
+def test_prior_correction_is_opt_in_and_would_silence_the_bot_model():
+    """
+    The correction is mathematically valid for a calibrated posterior, but an RF
+    probability is a tree-vote fraction — so enabling it at the measured 2.22%
+    prevalence would reject a raw 0.99.  Kept as a documented, available knob.
+    """
+    corrected = Thresholds(apply_prevalence_correction=True, bot_deploy_prevalence=0.0222)
+    assert corrected.raw_bot_score_needed() > 0.97        # raised from a raw 0.50
+    assert classify_flow(0.70, 0.95, corrected)["attack_type"] != "Bot"
+    # ...while the shipped default accepts the very same score.
+    assert classify_flow(0.70, 0.95, Thresholds())["attack_type"] == "Bot"
+
+
+def test_multiclass_hint_describes_but_never_labels_benign_as_an_alert():
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert classify_flow(0.90, None, th, "DDoS")["attack_type"] == "DDoS"
+    assert classify_flow(0.90, None, th, "BENIGN")["attack_type"] == "Attack (unclassified)"
+    assert classify_flow(0.90, None, th, None)["attack_type"] == "Attack (unclassified)"
+    assert classify_flow(0.90, None, th, "  ")["attack_type"] == "Attack (unclassified)"
+
+
+def test_severity_ladder_unchanged():
+    th = Thresholds()
+    assert severity_for(0.99, th) == "Critical"
+    assert severity_for(0.85, th) == "Critical"
+    assert severity_for(0.70, th) == "High"
+    assert severity_for(0.50, th) == "Medium"
+    assert severity_for(0.10, th) == "Low"
+
+
+def test_policy_reports_the_raw_score_it_demands():
+    """Operators need to know what the cut means on the raw rf_bot scale."""
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    # Correction off => the raw cut *is* the operating point.
+    assert abs(th.raw_bot_score_needed() - th.bot_threshold) < 1e-12
+    assert "P(attack) >= 0.65" in th.describe()
+    assert "every flagged flow" in th.describe()
+
+
+def test_policy_is_serialisable_for_logging_and_artifacts():
+    th = Thresholds()
+    assert json.loads(json.dumps(th.as_dict()))["attack_threshold"] == 0.65
+
+
+# ── Standalone runner ──────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    tests = [
+        (name, obj)
+        for name, obj in sorted(globals().items())
+        if name.startswith("test_") and callable(obj)
+    ]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - report and keep going
+            failed += 1
+            print(f"  FAIL  {name}: {type(exc).__name__}: {exc}")
+        else:
+            print(f"  ok    {name}")
+    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    sys.exit(1 if failed else 0)

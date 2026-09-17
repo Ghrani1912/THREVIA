@@ -154,13 +154,26 @@ function setRadarPaused(paused) {
 
 async function updateRadarIPs() {
     try {
-        const response = await fetch(`${API_BASE}/threats/recent?limit=8`);
+        // Fetch a wide window and stratify: nominal flows trickle in
+        // continuously while alerts arrive in ~5s bursts, so a plain
+        // newest-first slice is all-green between bursts and all-alert
+        // right after one. Fix the blip mix explicitly instead.
+        const response = await fetch(`${API_BASE}/threats/recent?limit=100`);
         const data = await response.json();
         
         if (data.threats) {
-            radarIPs = data.threats.slice(0, 8).map((threat, idx) => ({
+            const isNominal = t => t.observation === 'nominal';
+            const attacks = data.threats.filter(t => !isNominal(t));
+            const nominal = data.threats.filter(isNominal);
+            const NOMINAL_SLOTS = 2; // green baseline presence per sweep
+            const picked = [
+                ...attacks.slice(0, 8 - NOMINAL_SLOTS),
+                ...nominal.slice(0, NOMINAL_SLOTS),
+            ];
+            radarIPs = picked.map((threat, idx) => ({
                 ip: threat.src_ip || '0.0.0.0',
                 severity: threat.severity || 'Medium',
+                observation: threat.observation || '',
                 angle: (idx * 45) + (radarAngle % 360), // Spread around circle
                 distance: 60 + Math.random() * 30 // Random distance from center
             }));
@@ -228,12 +241,15 @@ function drawRadar() {
         const x = centerX + dist * Math.cos(angle);
         const y = centerY + dist * Math.sin(angle);
         
-        // Color by severity
+        // Color by severity. Nominal (benign) traffic arrives from the
+        // nominal_flows mirror with severity "Nominal" / observation "nominal"
+        // and renders green -- previously impossible, since only alert
+        // collections were queried and alerts are High/Critical by definition.
         let color = '#ff5555'; // red default for attacks
         if (blip.severity === 'Critical') color = '#ff3344';
         else if (blip.severity === 'High') color = '#ffaa00';
         else if (blip.severity === 'Medium') color = '#ff8844';
-        else if (blip.severity === 'Low') color = '#88ff88';
+        else if (blip.severity === 'Low' || blip.severity === 'Nominal' || blip.observation === 'nominal') color = '#88ff88';
         
         // Draw blip
         ctx.fillStyle = color;

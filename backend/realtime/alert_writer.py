@@ -7,7 +7,11 @@ dashboard can read them.
 Collections written:
   - threvia.stream_alerts  : windowed spike alerts from the streaming detector
   - threvia.bloom_hits     : per-row Bloom Filter flagged events
-  - threvia.ml_alerts      : per-flow ML-scored alerts (Pipeline C)
+  - threvia.ml_alerts      : ML-scored alerts (Pipeline C), aggregated per
+                             (src_ip, attack_type, severity) by default -- see
+                             ``aggregate_ml_alerts``.  Raw per-flow input is
+                             still accepted; the collapse keeps the collection
+                             proportional to incidents rather than to packets.
 
 All collections are time-indexed for efficient dashboard queries.
 
@@ -32,6 +36,107 @@ _DB_NAME   = os.getenv("MONGO_DB", "threvia")
 _COL_ALERTS = "stream_alerts"
 _COL_BLOOM  = "bloom_hits"
 _COL_ML     = "ml_alerts"
+_COL_NOMINAL = "nominal_flows"
+
+# Retention. Alert and nominal collections expire this many hours after
+# creation. At the observed ~20 docs/s this caps ml_alerts near ~1.2M docs
+# regardless of uptime; tune via env without touching code.
+DEFAULT_TTL_HOURS = 72.0
+TTL_HOURS = float(os.getenv("ALERT_TTL_HOURS", str(DEFAULT_TTL_HOURS)))
+
+# Collapse per-flow ML alerts into one document per (src_ip, attack_type,
+# severity).  Alert *volume* is what an analyst actually pays for, and a model
+# operating point is measured in flows, not documents -- storing 36,901 rows for
+# one benign host conflates the two.  Disable to restore row-per-document.
+_ML_ALERT_AGGREGATE = os.getenv("ML_ALERT_AGGREGATE", "true").strip().lower() \
+    in ("1", "true", "yes", "on")
+_ML_MAX_DST_SAMPLES = int(os.getenv("ML_MAX_DST_SAMPLES", "10"))
+
+
+def aggregate_ml_alerts(
+    alerts: list[dict],
+    max_dst_samples: int = _ML_MAX_DST_SAMPLES,
+) -> tuple[list[dict], int]:
+    """
+    Collapse per-flow ML alerts into one document per source-IP verdict.
+
+    Each output document keeps the shape the dashboard already reads
+    (``src_ip``, ``dst_ip``, ``attack_type``, ``confidence``, ``severity``,
+    ``event_time``, ``ground_truth_label``, ``ground_truth_cat``) and adds the
+    volume context needed to triage it:
+
+      ``flow_count``      flows in this group
+      ``dst_ip_count``    distinct destinations touched
+      ``dst_ips``         up to ``max_dst_samples`` example destinations
+      ``first_seen`` / ``last_seen`` / ``max_confidence``
+
+    The representative fields come from the highest-confidence flow, so
+    ``confidence`` and ``severity`` describe the strongest evidence, not an
+    average that hides it.
+
+    Returns ``(documents, original_row_count)``.
+    """
+    if not alerts:
+        return [], 0
+
+    groups: dict[tuple, dict] = {}
+    for alert in alerts:
+        key = (
+            str(alert.get("src_ip")),
+            str(alert.get("attack_type")),
+            str(alert.get("severity")),
+        )
+        confidence = alert.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        group = groups.get(key)
+        if group is None:
+            group = {
+                "_best": alert,
+                "_best_conf": confidence,
+                "flow_count": 0,
+                "dst_ips": [],       # capped sample, for display
+                "_dst_seen": set(),  # true distinct count
+                "first_seen": alert.get("event_time"),
+                "last_seen": alert.get("event_time"),
+            }
+            groups[key] = group
+
+        group["flow_count"] += 1
+        if confidence > group["_best_conf"]:
+            group["_best"] = alert
+            group["_best_conf"] = confidence
+
+        dst = alert.get("dst_ip")
+        if dst:
+            if dst not in group["_dst_seen"]:
+                group["_dst_seen"].add(dst)
+                if len(group["dst_ips"]) < max_dst_samples:
+                    group["dst_ips"].append(dst)
+
+        event_time = alert.get("event_time")
+        if event_time:
+            if group["first_seen"] is None or str(event_time) < str(group["first_seen"]):
+                group["first_seen"] = event_time
+            if group["last_seen"] is None or str(event_time) > str(group["last_seen"]):
+                group["last_seen"] = event_time
+
+    documents: list[dict] = []
+    for group in groups.values():
+        best = dict(group["_best"])
+        best["confidence"] = group["_best_conf"]
+        best["max_confidence"] = group["_best_conf"]
+        best["flow_count"] = group["flow_count"]
+        best["dst_ip_count"] = len(group["_dst_seen"])
+        best["dst_ips"] = group["dst_ips"]
+        best["first_seen"] = group["first_seen"]
+        best["last_seen"] = group["last_seen"]
+        documents.append(best)
+
+    return documents, len(alerts)
 
 
 class AlertWriter:
@@ -171,16 +276,29 @@ class AlertWriter:
         Bulk-insert ML-scored flow alerts (Pipeline C output).
 
         Each dict should contain:
-            src_ip, dst_ip, proto, dst_port, event_time  -- identity fields
-            p_attack     float   RF binary P(attack)
-            attack_type  str     RF multiclass predicted label
-            p_bot        float   RF bot-binary P(bot)
-            cluster_id   int     KMeans cluster assignment
-            severity     str     Critical / High / Medium
+            src_ip, dst_ip, attack_type, event_time  -- identity fields
+            confidence        float  P(attack) from the binary RF
+            severity          str    Critical / High / Medium
+            p_bot             float  raw Bot-specialist P(bot)
+            p_bot_calibrated  float  prior-corrected P(bot), or None
+            bot_routed        bool   whether the Bot specialist was consulted
+
+        By default the input is collapsed per (src_ip, attack_type, severity)
+        before insertion -- see ``aggregate_ml_alerts``.  Without this, a single
+        benign source IP sending N flows that trip the threshold becomes N alert
+        documents, so an unchanged model suddenly looks like N false positives.
+        Set ``ML_ALERT_AGGREGATE=false`` to store one document per flow.
+
         Returns the number of documents inserted.
         """
         if not alerts:
             return 0
+
+        if _ML_ALERT_AGGREGATE:
+            alerts, raw_count = aggregate_ml_alerts(alerts)
+            logger.info("ML alert aggregation: %d flow rows -> %d documents",
+                        raw_count, len(alerts))
+
         now = datetime.now(timezone.utc)
         for doc in alerts:
             doc.setdefault("type", "ml_alert")
@@ -247,6 +365,41 @@ class AlertWriter:
         ]
         return list(self._col(_COL_BLOOM).aggregate(pipeline))
 
+    def write_nominal_flows_bulk(self, flows: list[dict]) -> int:
+        """
+        Bulk-insert nominal (benign) flow observations (Pipeline C output).
+
+        The alert collections only ever contain flagged flows, which is why the
+        radar never showed a green dot: the benign ~66% of the stream was
+        scored and silently dropped.  This collection mirrors a sample of those
+        rejected flows so dashboards can display baseline traffic alongside
+        threats.  Shape matches an ML alert minus verdict fields, plus:
+
+            p_attack        float  the (low) score that rejected it
+            observation     str    always "nominal"
+
+        Subject to the same TTL as alerts.
+        """
+        if not flows:
+            return 0
+        now = datetime.now(timezone.utc)
+        for doc in flows:
+            doc.setdefault("type", "nominal_flow")
+            doc.setdefault("created_at", now)
+        result = self._col(_COL_NOMINAL).insert_many(flows)
+        logger.debug("Nominal flows inserted: %d", len(result.inserted_ids))
+        return len(result.inserted_ids)
+
+    def get_recent_nominal_flows(self, limit: int = 100) -> list[dict]:
+        """Return the most recent nominal flows (newest first)."""
+        cursor = (
+            self._col(_COL_NOMINAL)
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+        return list(cursor)
+
     # ── Internals ───────────────────────────────────────────────────────────
 
     def _col(self, name: str):
@@ -276,8 +429,68 @@ class AlertWriter:
             self._db[_COL_ML].create_index(
                 [("attack_type", ASCENDING)], background=True
             )
+            # Nominal (benign) traffic mirror -- see write_nominal_flows.
+            self._db[_COL_NOMINAL].create_index(
+                [("created_at", ASCENDING)], background=True
+            )
+            self._db[_COL_NOMINAL].create_index(
+                [("src_ip", ASCENDING)], background=True
+            )
+            self._ensure_ttls()
         except errors.PyMongoError as exc:
             logger.warning("Index creation warning: %s", exc)
+
+    def _ensure_ttls(self) -> None:
+        """Apply TTL expiry to time-stamped collections.
+
+        Without this, ``ml_alerts`` grows at ~1.7M docs/day and the dashboard's
+        unbounded ``find().sort().limit()`` scans keep paying for it.  Each
+        collection expires docs ``TTL_HOURS`` after ``created_at``; Mongo's TTL
+        monitor sweeps roughly once a minute, so expiry is near-schedule.
+
+        Note on ``expireAfterSeconds`` changes: MongoDB only rebuilds a TTL
+        index's clock when the index is dropped and recreated.  The
+        drop-and-recreate below is therefore expected on first run after a
+        change, and runs in the background.
+        """
+        ttl_specs = {
+            _COL_ALERTS: TTL_HOURS,
+            _COL_BLOOM: TTL_HOURS,
+            _COL_ML: TTL_HOURS,
+            _COL_NOMINAL: TTL_HOURS,
+        }
+        for name, hours in ttl_specs.items():
+            try:
+                coll = self._db[name]
+                index_name = "created_at_1"
+                existing = coll.list_indexes()
+                current = next(
+                    (i for i in existing if i["name"] == index_name), None
+                )
+                wanted = int(hours * 3600)
+                if current is None:
+                    coll.create_index(
+                        [("created_at", ASCENDING)],
+                        expireAfterSeconds=wanted,
+                        background=True,
+                    )
+                    logger.info("TTL index on %s created (%.0fh)", name, hours)
+                elif int(current.get("expireAfterSeconds", -1)) != wanted:
+                    logger.info(
+                        "TTL on %s is %ss, wanted %ss -- recreating",
+                        name, current.get("expireAfterSeconds"), wanted,
+                    )
+                    coll.drop_index(index_name)
+                    coll.create_index(
+                        [("created_at", ASCENDING)],
+                        expireAfterSeconds=wanted,
+                        background=True,
+                    )
+            except errors.OperationFailure as exc:
+                # e.g. a long-running index build; retry on next connect.
+                logger.warning("TTL setup for %s deferred: %s", name, exc)
+            except errors.PyMongoError as exc:
+                logger.warning("TTL index warning for %s: %s", name, exc)
 
 
 # ── Standalone test ─────────────────────────────────────────────────────────
