@@ -25,6 +25,7 @@ Usage:
       /workspace/backend/ml/train_bot_classifier.py
 """
 
+import os
 import sys
 sys.path.insert(0, '/workspace')
 
@@ -36,9 +37,15 @@ from pyspark.ml.evaluation import (
 )
 
 # ── HDFS paths ──────────────────────────────────────────────────────────────
-HDFS_CORPUS     = 'hdfs://namenode:8020/threvia/corpus/train'
-HDFS_BOT_TEST   = 'hdfs://namenode:8020/threvia/corpus/friday_bot_test'
-HDFS_MODEL_OUT  = 'hdfs://namenode:8020/threvia/models_clean/rf_bot_binary'
+HDFS_ROOT       = 'hdfs://namenode:8020/threvia'
+HDFS_CORPUS     = f'{HDFS_ROOT}/corpus/train'
+HDFS_BOT_TEST   = f'{HDFS_ROOT}/corpus/friday_bot_test'
+# MODELS_OUT lets a candidate retrain be written somewhere other than the live
+# model directory so it can be evaluated before promotion.
+HDFS_MODELS_OUT = os.getenv('MODELS_OUT', f'{HDFS_ROOT}/models_clean')
+HDFS_MODEL_OUT  = f'{HDFS_MODELS_OUT}/rf_bot_binary'
+# Live Tier-1 models, used for the like-for-like comparison below.
+HDFS_MODELS     = f'{HDFS_ROOT}/models_clean'
 
 FEAT_COL  = 'scaled_features'
 LABEL_COL = 'Label'
@@ -123,6 +130,34 @@ def main():
     # ── 4. Evaluate on TEST-C1 Bot test split ────────────────────────────────
     sep('4. Evaluate on TEST-C1 Bot test split')
     bot_test = spark.read.parquet(HDFS_BOT_TEST)
+
+    # friday_bot_test holds held-out Bot *sessions*.  Depending on how the
+    # split was regenerated it may carry raw feature columns rather than the
+    # scaled vector, so derive `scaled_features` with the saved scaler when
+    # it is missing instead of assuming.
+    if FEAT_COL not in bot_test.columns:
+        print(f'  {FEAT_COL} absent -- applying saved scaler pipeline')
+        from pyspark.ml import PipelineModel
+        from backend.ml.train_clean_corpus import clean_and_scale_external
+        from backend.processing.schema_maps import CANONICAL_FEATURE_COLS, LABEL_NORMALISE
+        from pyspark.sql.types import StringType
+
+        norm_map = {k.upper(): v for k, v in LABEL_NORMALISE.items()}
+        bc_map = spark.sparkContext.broadcast(norm_map)
+        _label_udf = F.udf(
+            lambda raw: bc_map.value.get(raw.strip().upper(), raw.strip()) if raw else None,
+            StringType(),
+        )
+        _feat_cols = [c for c in CANONICAL_FEATURE_COLS if c != 'Label']
+        _pipe = PipelineModel.load(f'{HDFS_MODELS}/scaler_pipeline')
+        try:
+            _med = spark.read.parquet(f'{HDFS_MODELS}/imputer_medians').first()
+            _medians = dict(_med.asDict()) if _med else {}
+        except Exception:
+            _medians = {}
+        bot_test = clean_and_scale_external(
+            spark, bot_test, _feat_cols, _pipe, _label_udf, fill_map=_medians)
+
     bot_test = bot_test.withColumn(
         BOT_COL,
         F.when(F.upper(F.trim(F.col(LABEL_COL))) == 'BOT', F.lit(1)).otherwise(F.lit(0))
@@ -149,6 +184,29 @@ def main():
 
   Per-class breakdown (0=not-Bot, 1=Bot):""")
     preds.groupBy(BOT_COL, 'prediction').count().orderBy(BOT_COL, 'prediction').show()
+
+    # ── 4b. The same Bot rows through the Tier-1 multiclass model ────────────
+    # This is the number the docs quote ("Bot 65.26%"); measuring both on one
+    # set makes clear which tier is actually weak.
+    sep('4b. Tier-1 multiclass comparison on the identical Bot rows')
+    try:
+        from pyspark.ml.classification import RandomForestClassificationModel
+        lm_df = spark.read.parquet(f'{HDFS_MODELS}/label_index_map')
+        idx_to_label = {int(r['idx']): r['label'] for r in lm_df.collect()}
+        bot_idx = [i for i, v in idx_to_label.items() if v == 'Bot']
+        multi_model = RandomForestClassificationModel.load(f'{HDFS_MODELS}/rf_multiclass')
+        mp = multi_model.transform(bot_test)
+        if bot_idx and n_bot_test > 0:
+            t1_hit = mp.filter(
+                (F.col(BOT_COL) == 1) & (F.col('prediction') == float(bot_idx[0]))
+            ).count()
+            print(f'  Tier-1 multiclass Bot recall : {t1_hit / n_bot_test:.4f} '
+                  f'({t1_hit:,}/{n_bot_test:,})')
+            print(f'  Tier-2 specialist Bot recall : {m["rec"]:.4f}  (above)')
+        else:
+            print('  No Bot index in label_index_map; comparison skipped.')
+    except Exception as e:
+        print(f'  Tier-1 comparison unavailable: {e}')
 
     # Feature importances (top 15)
     sep('Top 15 features for Bot detection')

@@ -397,53 +397,51 @@ async def get_timeline_data(hours: int = 24):
     except Exception as e:
         return {"error": str(e)}
 
+# Model performance is a *measured* artifact, not a constant.  The endpoint used
+# to return hardcoded numbers, several of which came from a known-broken
+# evaluation path (the 18.24% C2 FPR was corrected to 12.87% once the scaler
+# column-rename bug was fixed), so the dashboard could disagree with the models
+# actually deployed.  ``backend/ml/train_clean_corpus.py`` now emits this file on
+# every retrain; see documentation/FINAL_MODEL_EVALUATION.md.
+MODEL_METRICS_PATH = os.getenv(
+    "MODEL_METRICS_PATH",
+    os.path.join(_ROOT_DIR, "backend", "ml", "model_metrics.json"),
+)
+
+
 @app.get("/api/v1/model/performance")
 async def get_model_performance():
-    """Get current model performance metrics.
-    Updated: v2 class-weighted RF + Tier-2 Bot specialist (Sept 13 2026)
+    """Measured model evaluation metrics, read from the retrain artifact.
+
+    Returns ``source: "measured"`` with the artifact's contents when the file
+    exists.  When it does not, returns ``source: "unavailable"`` and no recall
+    numbers at all -- an explicit gap is preferable to stale constants that
+    look like telemetry.
     """
-    return {
-        "supervised": {
-            # Tier-1: Main RF (inverse-frequency class-weighted, Corpus v4)
-            "ddos":             {"recall": 99.83, "status": "optimal",  "tier": 1},
-            "portscan":         {"recall": 99.91, "status": "optimal",  "tier": 1},
-            "benign":           {"recall": 90.04, "status": "optimal",  "tier": 1},
-            "ssh_patator":      {"recall": 99.78, "status": "optimal",  "tier": 1},
-            "ftp_patator":      {"recall": 97.39, "status": "optimal",  "tier": 1},
-            "dos_hulk":         {"recall": 100.00, "status": "optimal", "tier": 1},
-            "dos_goldeneye":    {"recall": 89.34, "status": "good",     "tier": 1},
-            "dos_slowhttptest": {"recall": 44.75, "status": "marginal", "tier": 1},
-            "bot":              {"recall": 68.25, "status": "good",     "tier": 1},
-            "infiltration":     {"recall": 68.97, "status": "good",     "tier": 1},
-        },
-        "tier2_bot_specialist": {
-            "model": "rf_bot_binary",
-            "routing": "main RF confidence < 0.80",
-            "status": "active",
-            "note": "Dedicated Bot binary RF (100 trees, depth 12, balanced 50/50)"
-        },
-        "tier3_infiltration_rules": {
-            "rules": ["duration>=60s + bytes/s<=500", "duration>=60s + port in C2 set", "duration>=60s + bwd/fwd ratio>=3x"],
-            "status": "active",
-            "note": "Overrides BENIGN prediction when Infiltration rules fire"
-        },
-        "unsupervised": {
-            "kmeans_purity": 91.31,
-            "status": "optimal"
-        },
-        "bloom_filter": {
-            "false_positive_rate": 0.01,
-            "latency_us": 0.12,
-            "status": "deterministic"
-        },
-        "overall": {
-            "friday_benign_fpr": 18.24,
-            "macro_f1": 88.5,
-            "weighted_f1": 99.51,
-            "accuracy": 99.51,
-            "note": "Macro-F1 estimated post class-weight fix; C2 FPR=18.24% on Friday BENIGN (temporal shift)"
+    import json
+
+    try:
+        with open(MODEL_METRICS_PATH, "r", encoding="utf-8") as fh:
+            metrics = json.load(fh)
+    except FileNotFoundError:
+        return {
+            "source": "unavailable",
+            "path": MODEL_METRICS_PATH,
+            "note": (
+                "No measured metrics artifact. Re-run the retrain "
+                "(backend/ml/train_clean_corpus.py) to generate it."
+            ),
         }
-    }
+    except Exception as exc:  # malformed artifact should not 500 the dashboard
+        return {
+            "source": "unavailable",
+            "path": MODEL_METRICS_PATH,
+            "error": str(exc),
+        }
+
+    metrics["source"] = "measured"
+    metrics["path"] = MODEL_METRICS_PATH
+    return metrics
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # WEBSOCKET FOR REAL-TIME UPDATES

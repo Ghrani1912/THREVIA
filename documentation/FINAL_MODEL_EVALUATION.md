@@ -970,3 +970,138 @@ argued from the same evidence.
 | `backend/realtime/test_alert_aggregation.py` | 11 tests — collapse behaviour, capped samples, true distinct counts, malformed-input safety |
 
 Both suites run standalone (`python <file>`) or under pytest.
+
+---
+
+## UPDATE -- September 17, 2026 (Model retrain: correctness fix, no measured gain)
+
+This section reports the outcome of acting on this document's own recommendation
+("Cap class weights at 100x (retrain)"). The short version: **the retrain fixed a real
+defect in the training code, but it did not make the models detect better, and it should
+not be promoted as a performance improvement.**
+
+### What was actually wrong
+
+`train_clean_corpus.py` computed **one** class-weight column from the *multiclass* label
+distribution and handed it to **both** RandomForests. Measured by
+`backend/ml/audit_class_weights.py` on the 15,694,171-row corpus:
+
+| Target | Class | Weight it used | Weight it should have used |
+|--------|-------|----------------|----------------------------|
+| binary (benign vs attack) | BENIGN | **0.096x** | **0.672x** |
+| binary | attack (any) | 0.62x - 22,420x | **1.954x** |
+| binary | Web Attack - Sql Injection | 22,420x | 1.954x |
+| binary | Web Attack - XSS | 9,663x | 1.954x |
+
+So the model deciding *attack or not* had BENIGN under-weighted by ~7x while a 50-row
+Sql-Injection class was over-weighted 22,420x. That is a genuine defect and worth fixing on
+its own terms.
+
+### The fix
+
+`train_clean_corpus.py` now computes **per-target** weights, capped at `WEIGHT_CAP`
+(default 100):
+
+* `weight_bin` = N / (2 x count(is_attack)) -> the binary RF (BENIGN 0.672x / ATTACK 1.954x)
+* `weight_multi` = min(N / (K x count(Label)), 100) -> the multiclass RF
+
+The cap moves exactly 4 classes (Sql Injection 22,420x -> 100x, XSS 9,663x -> 100x,
+Brute Force 4,311x -> 100x, DoS slowloris 109x -> 100x). Bot (11.5x) and Infiltration (6.9x)
+are unchanged by it.
+
+The script also gained `MODELS_OUT` (write a candidate somewhere other than the live model
+directory) and a memory fix: the corpus is 81 columns wide and carries **two** dense vectors per
+row (`raw_features` and `scaled_features`), so caching it before and after the weight joins
+OOM'd the driver. It is now computed once, pruned to the 6 columns training reads, and cached once.
+
+### The measurement that matters
+
+Retrained weights produce a spectacular-looking headline -- C2 temporal BENIGN FPR falls from
+**18.24% to 0.18%** at the same nominal cut of 0.50 -- but that comparison is misleading,
+because the score distribution moved. What matters is performance **at matched false-positive
+rates** (`backend/ml/compare_model_versions.py` and `backend/ml/sweep_operating_point.py`):
+
+| C2 temporal FPR (matched) | v1 IDS2025 attack recall | v2 IDS2025 attack recall |
+|---------------------------|--------------------------|--------------------------|
+| ~4% (v1 T=0.70 / v2 T=0.25) | 52.45% | 50.83% |
+| ~0.25% (v1 T=0.90 / v2 T=0.45) | 45.93% | 45.47% |
+| ~6.5% (v1 T=0.65 / v2 T=0.20) | 61.66% | 52.50% |
+
+At matched FPR the two are equivalent within noise, and slightly favour v1 at the higher-FPR
+end. **The retrain recalibrates the score scale; it does not improve separation.** Every gain
+attributed to it is reachable on the old models by moving the threshold.
+
+### Consequences that must be respected
+
+1. **Do not deploy v2 with T=0.65.** With the corrected scores, a 0.65 cut detects **0%** of
+   held-out Bot flows (it was 99.47% on v1). The documented 0.65 operating point was tuned for
+   the distorted score scale and is invalid for the retrained model.
+2. **C2 FPR figures in this document are not reproducible.** Measured through the corrected
+   preprocessing path (saved scaler pipeline + training imputer medians, via
+   `clean_and_scale_external`), v1 gives **18.24%** at T=0.50 and **6.79%** at T=0.65 -- the
+   numbers this document attributes to the *broken* scaler run. The claimed correction to
+   12.87% / 3.65% does not reproduce.
+3. **The recommended threshold sweep (0.50 -> 0.75) was never the FPR fix it appears to be.**
+   It is a monotone recall-for-precision trade available on either model, not evidence of a
+   model improvement.
+
+### Bot: what the 65% figure actually is
+
+| Measurement | Value | Support |
+|-------------|-------|---------|
+| Tier-1 **multiclass** label recall, C1 held-out Bot sessions | 68.25% (v1) / 67.89% (v2) | 570 |
+| Tier-1 **binary** model at the deployed cut T=0.65 (v1) | **99.47%** | 570 |
+| Tier-2 `rf_bot_binary` specialist, streamed corpus | **100% recall, 95.56% precision** | 905 |
+
+The pipeline's Bot path is not at 65%. 65-68% is the multiclass model's ability to *name* Bot
+while separating 13 other classes; the binary model flags 99.5% of them at the deployed cut, and
+the specialist then labels them. The number that was genuinely broken historically (0.31%
+multiclass recall before class weights) is fixed.
+
+### Infiltration: not evaluable with the data present
+
+The 68.97% in the table above comes from **20 of 29 rows** on the IDS2025 validation set. The
+only cross-dataset Infiltration holdout in this repository (CIC-2017 Thursday Afternoon) contains
+**36 Infiltration rows against 288,566 BENIGN**. Measured on it, using identical preprocessing
+(`backend/ml/train_infiltration_classifier.py`):
+
+| Detector | Infiltration recall | BENIGN FPR |
+|----------|--------------------|------------|
+| Tier-1 multiclass RF | 77.78% (28/36) | - |
+| Tier-3 rule detector | 41.67% (15/36) | **7.40%** |
+| New Tier-2b specialist (`rf_infiltration_binary`, AUC 0.9654) | 19.44% (7/36) | 0.67% |
+
+A purpose-built Infiltration specialist -- the approach that worked for Bot -- is **worse**
+than the existing Tier-1 path on this holdout, and the Tier-3 rules carry a 7.4% BENIGN false
+positive rate while catching under half the Infiltration flows. Nothing here supports a claim
+about Infiltration either way: 36 rows cannot separate 77.8% from 19.4%.
+
+The actionable step is to build a **proper held-out split from the 161,934 CICIDS2018
+Infiltration rows** already in the training corpus, so this class can be evaluated at all. Until
+then, treat every Infiltration number in this document as unmeasured.
+
+Worth noting alongside that: on the streamed corpus at T=0.65, **980 of the 986 flows labelled
+Infiltration were truly BENIGN** -- that bucket was 76% of all remaining false positives. For
+this class, precision is the problem, not recall.
+
+### What was NOT achieved
+
+* No retrain improved discrimination. Bot, Infiltration and cross-source recall are all within
+  noise of where they were.
+* Infiltration remains unevaluable.
+* The residual false positives (slow/sparse BENIGN, mislabelled on the multiclass side) are
+  unchanged in composition.
+
+### Tooling added
+
+| File | Purpose |
+|------|---------|
+| `backend/ml/audit_class_weights.py` | Prints per-class support and the uncapped vs capped weights for both targets -- the table that identified the defect |
+| `backend/ml/compare_model_versions.py` | Scores two model directories on identical holdouts |
+| `backend/ml/sweep_operating_point.py` | Full P(attack) sweep: C2 FPR, IDS2025 attack recall, IDS2025 BENIGN FPR, DDoS/Bot recall |
+| `backend/ml/train_infiltration_classifier.py` | Tier-2b Infiltration specialist + three-way baseline comparison |
+| `backend/ml/model_metrics.json` | Measured metrics artifact; now the source for `GET /api/v1/model/performance` |
+
+`/api/v1/model/performance` no longer returns hardcoded constants. It reads
+`backend/ml/model_metrics.json` and returns `source: "unavailable"` rather than invented
+numbers when the artifact is absent.

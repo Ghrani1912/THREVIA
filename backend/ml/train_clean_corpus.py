@@ -23,6 +23,7 @@ Usage:
       /workspace/backend/ml/train_clean_corpus.py
 """
 
+import os
 import sys
 sys.path.insert(0, '/workspace')
 
@@ -50,6 +51,20 @@ HDFS_DDOS_TEST  = 'hdfs://namenode:8020/threvia/corpus/friday_ddos_test'   # TES
 HDFS_BOT_TEST   = 'hdfs://namenode:8020/threvia/corpus/friday_bot_test'    # TEST-C1: held-out Bot sessions
 HDFS_BENIGN_C2  = 'hdfs://namenode:8020/threvia/corpus/friday_benign_c2'   # TEST-C2: Friday BENIGN temporal holdout
 HDFS_MODELS_NEW = 'hdfs://namenode:8020/threvia/models_clean'
+
+# ── Class-weight configuration ────────────────────────────────────────────────
+# WEIGHT_CAP caps inverse-frequency class weights.  Pre-fix they were unbounded
+# and reached 22,420x for "Web Attack - Sql Injection" (50 rows in a 15.69M-row
+# corpus) and 9,663x for XSS.  See backend/ml/audit_class_weights.py for the
+# full table.  The cap preserves genuine uplift for rare classes while removing
+# the anomalous amplification that pulled slow/sparse BENIGN flows across the
+# binary decision boundary.
+WEIGHT_CAP = float(os.getenv('WEIGHT_CAP', '100.0'))
+
+# MODELS_OUT lets a candidate retrain be written somewhere other than the live
+# model directory, so it can be evaluated on the held-out sets before promotion.
+# Scaler + imputer medians are always *loaded* from HDFS_MODELS_NEW.
+MODELS_OUT = os.getenv('MODELS_OUT', HDFS_MODELS_NEW)
 
 FEAT_COL    = 'scaled_features'
 LABEL_COL   = 'Label'
@@ -124,15 +139,24 @@ def per_class_recall(preds, label_col, label_map):
         .groupBy(label_col).count().withColumnRenamed('count', 'correct')
     )
     ldf = spark_broadcast_label_map(preds.sparkSession, label_map, label_col)
-    (
+    table = (
         total_pc.join(correct, label_col, 'left')
         .fillna(0, subset=['correct'])
         .withColumn('recall', F.round(F.col('correct') / F.col('support'), 4))
         .join(ldf, label_col, 'left')
         .orderBy(F.desc('support'))
         .select(label_col, 'label_name', 'support', 'correct', 'recall')
-        .show(20, truncate=False)
     )
+    table.show(20, truncate=False)
+    # Also return the table so the caller can persist it as a metric artifact.
+    return {
+        (r['label_name'] or f'idx_{r[label_col]}'): {
+            'support': int(r['support']),
+            'correct': int(r['correct']),
+            'recall': float(r['recall']),
+        }
+        for r in table.collect()
+    }
 
 
 def spark_broadcast_label_map(spark, label_map, label_col):
@@ -241,23 +265,90 @@ def main():
         .orderBy(F.desc('count'))
         .show(20, truncate=False)
     )
-    train.cache()
+    # NOTE: `train` is deliberately NOT cached here.  The corpus is 81 columns
+    # wide and carries TWO dense vectors per row (raw_features and
+    # scaled_features), so materialising it before the weight joins and again
+    # afterwards exhausts the driver heap (observed: java.lang.OutOfMemoryError
+    # during the binary RF fit).  The weight tables are computed first, then
+    # joined once, then the frame is pruned to the columns training actually
+    # reads and cached exactly once.
 
-    # Fix-1: Inverse-frequency class weights (no corpus rebuild needed).
-    # weight_i = N / (K * count_i)  where N=total rows, K=num classes.
-    # This corrects Bot/Infiltration/Slowhttptest recall without SMOTE.
-    sep('Computing inverse-frequency class weights')
+    # Fix-1b: SEPARATE weight columns, one per target, each capped (WEIGHT_CAP).
+    #
+    # The pre-fix code computed ONE weight column from the MULTICLASS label
+    # distribution and handed it to BOTH models.  Measured consequences on this
+    # corpus (see audit_class_weights.py):
+    #
+    #   binary model received  BENIGN 0.1x vs Sql Injection 22,420x
+    #   correct binary weights BENIGN 0.672x vs ATTACK 1.954x
+    #
+    # i.e. BENIGN was under-weighted ~6.7x while rare attack rows were
+    # over-weighted by four to five figures, when deciding attack-or-not.  That
+    # is the documented cause of the slow/sparse-BENIGN false positives: the
+    # binary model was pushed to call anything resembling a rare slow attack an
+    # attack, and slow/sparse BENIGN traffic has the same shape.
+    #
+    #   weight_bin   = N / (2 * count_is_attack)          -> benign-vs-attack RF
+    #   weight_multi = N / (K * count_label), capped      -> multiclass RF
+    sep('Computing per-target inverse-frequency class weights')
+    print(f'  WEIGHT_CAP = {WEIGHT_CAP:g}')
+    print('  (weight tables are computed before anything is cached -- they are\n'
+          '   small aggregations and need no materialised corpus)')
+
+    # -- Multiclass weights (used by the multiclass RF only) --
     freq_df = train.groupBy(LABEL_COL).count().withColumnRenamed('count', '_cnt')
     num_classes = freq_df.count()
-    weight_df = freq_df.withColumn(
-        'weight',
-        F.lit(float(train_n)) / (F.lit(float(num_classes)) * F.col('_cnt'))
-    ).select(LABEL_COL, 'weight')
-    print('  Per-class weights:')
-    weight_df.orderBy(F.desc('weight')).show(20, truncate=False)
-    train = train.join(weight_df, on=LABEL_COL, how='left')
-    train = train.fillna(1.0, subset=['weight'])
+    multi_weight_df = (
+        freq_df.withColumn(
+            '_raw',
+            F.lit(float(train_n)) / (F.lit(float(num_classes)) * F.col('_cnt')),
+        )
+        .withColumn('weight_multi', F.least(F.col('_raw'), F.lit(WEIGHT_CAP)))
+        .select(LABEL_COL, 'weight_multi', '_raw')
+    )
+    print('\n  Multiclass weights (multiclass RF):')
+    multi_weight_df.orderBy(F.desc('_raw')).show(20, truncate=False)
+    _moved = multi_weight_df.filter(F.col('_raw') > F.lit(WEIGHT_CAP)).count()
+    print(f'  Labels moved by the {WEIGHT_CAP:g}x cap: {_moved}')
+    label_weight_df = multi_weight_df.select(LABEL_COL, 'weight_multi')
+
+    # -- Binary weights (used by the binary RF only) --
+    bin_freq = (
+        train.withColumn(
+            '_binary_tmp',
+            F.when(F.upper(F.trim(F.col(LABEL_COL))) == 'BENIGN', F.lit(0)).otherwise(F.lit(1)),
+        )
+        .groupBy('_binary_tmp').count().withColumnRenamed('count', '_bcnt')
+    )
+    bin_weight_df = bin_freq.withColumn(
+        'weight_bin',
+        F.least(
+            F.lit(float(train_n)) / (F.lit(2.0) * F.col('_bcnt')),
+            F.lit(WEIGHT_CAP),
+        ),
+    ).withColumnRenamed('_binary_tmp', BINARY_COL).select(BINARY_COL, 'weight_bin')
+    print('\n  Binary weights (binary RF):  0 = BENIGN, 1 = attack')
+    bin_weight_df.orderBy(BINARY_COL).show(10, truncate=False)
+
+    # Prune to the columns training reads, then join the two tiny weight tables.
+    # Dropping raw_features and the 75 unscaled feature columns roughly halves
+    # the cached footprint.
+    train = (
+        train.select(FEAT_COL, LABEL_COL, BINARY_COL, MULTI_COL)
+        .join(F.broadcast(label_weight_df), on=LABEL_COL, how='left')
+        .join(F.broadcast(bin_weight_df), on=BINARY_COL, how='left')
+        .fillna(1.0, subset=['weight_bin', 'weight_multi'])
+        .select(FEAT_COL, LABEL_COL, BINARY_COL, MULTI_COL, 'weight_bin', 'weight_multi')
+    )
+    # Default MEMORY_AND_DISK is enough now that the frame is pruned: the
+    # original script cached 81 columns and completed, and this holds 6, so the
+    # cached footprint drops roughly 3x.  (Spark 4.2 no longer exposes the
+    # MEMORY_AND_DISK_SER constant, so the plain cache is also the portable
+    # choice.)
     train.cache()
+    print(f'\n  Cached training frame : {train.count():,} rows x {len(train.columns)} cols'
+          f' (feature vector: {len(feat_cols)} dims)')
+    print(f'  Columns kept          : {train.columns}')
 
 
     # Bug-1 fix: load the scaler pipeline saved by merge_corpus.py.
@@ -285,26 +376,26 @@ def main():
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     sep('A. Train â€” Binary RF (is_attack 0/1)')
     rf_bin = RandomForestClassifier(
-        featuresCol=FEAT_COL, labelCol=BINARY_COL, weightCol='weight',
+        featuresCol=FEAT_COL, labelCol=BINARY_COL, weightCol='weight_bin',
         numTrees=50, maxDepth=10, seed=42,
     )
     print('  Training RF binary (50 trees, depth 10) ...')
     rf_bin_model = rf_bin.fit(train)
-    rf_bin_model.write().overwrite().save(f'{HDFS_MODELS_NEW}/rf_binary')
-    print(f'  Saved -> {HDFS_MODELS_NEW}/rf_binary')
+    rf_bin_model.write().overwrite().save(f'{MODELS_OUT}/rf_binary')
+    print(f'  Saved -> {MODELS_OUT}/rf_binary')
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # B) MULTI-CLASS RANDOM FOREST
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     sep('B. Train â€” Multi-class RF (all attack types)')
     rf_multi = RandomForestClassifier(
-        featuresCol=FEAT_COL, labelCol=MULTI_COL,  weightCol='weight',
+        featuresCol=FEAT_COL, labelCol=MULTI_COL,  weightCol='weight_multi',
         numTrees=50, maxDepth=10, seed=42,
     )
     print('  Training RF multi-class (50 trees, depth 10) ...')
     rf_multi_model = rf_multi.fit(train)
-    rf_multi_model.write().overwrite().save(f'{HDFS_MODELS_NEW}/rf_multiclass')
-    print(f'  Saved -> {HDFS_MODELS_NEW}/rf_multiclass')
+    rf_multi_model.write().overwrite().save(f'{MODELS_OUT}/rf_multiclass')
+    print(f'  Saved -> {MODELS_OUT}/rf_multiclass')
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # EVALUATION ON TEST SETS
@@ -398,7 +489,7 @@ def main():
     print('\\n  Multi-class (C1):')
     for k, v in m_c1_multi.items(): print(f'    {k:<8}: {v:.4f}')
     print('\\n  Per-class recall (C1 — DDoS + Bot held-out):')
-    per_class_recall(preds_c1_multi, MULTI_COL, label_map)
+    c1_per_class = per_class_recall(preds_c1_multi, MULTI_COL, label_map)
 
     # ── TEST-C2: Friday BENIGN temporal holdout ──────────────────────────────────────────
     sep('TEST-C2: Friday BENIGN temporal holdout (genuine OOD generalisation)')
@@ -429,6 +520,43 @@ def main():
     # Use m_c_bin / m_c_multi as aliases for comparison table (C1 is primary)
     m_c_bin   = m_c1_bin
     m_c_multi = m_c1_multi
+
+    # ── Emit the measured metrics artifact ───────────────────────────────────────────────────
+    # The dashboard reads this instead of hardcoded constants, so the numbers it
+    # shows are always the ones this run actually produced.
+    sep('Emitting measured metrics artifact')
+    try:
+        import json as _json, datetime as _dt
+        _metrics = {
+            'generated_at': _dt.datetime.utcnow().isoformat() + 'Z',
+            'generated_by': 'backend/ml/train_clean_corpus.py',
+            'models_dir': MODELS_OUT,
+            'training_rows': int(train_n),
+            'weighting': {
+                'scheme': 'per-target inverse-frequency, capped',
+                'weight_cap': WEIGHT_CAP,
+                'binary_weights': {str(r[BINARY_COL]): round(float(r['weight_bin']), 4)
+                                   for r in bin_weight_df.collect()},
+                'multiclass_weights': {r[LABEL_COL]: round(float(r['weight_multi']), 4)
+                                       for r in label_weight_df.collect()},
+            },
+            'label_map': {str(k): v for k, v in label_map.items()},
+            'tests': results,
+            'temporal_benign_holdout': {
+                'rows': int(n_c2),
+                'false_positives': int(fp_c2),
+                'fpr': round(float(fp_rate_c2), 6),
+                'fpr_percent': round(float(fp_rate_c2) * 100, 2),
+            },
+            'per_class_recall': {'C1_session_split': c1_per_class},
+        }
+        _out = os.path.join('/workspace', 'backend', 'ml', 'model_metrics.json')
+        with open(_out, 'w', encoding='utf-8') as _fh:
+            _json.dump(_metrics, _fh, indent=2, default=str)
+        print(f'  Wrote {_out}')
+        print(f'  C2 temporal BENIGN FPR: {fp_rate_c2 * 100:.2f}%  ({fp_c2:,}/{n_c2:,})')
+    except Exception as _e:
+        print(f'  WARNING: could not write metrics artifact ({_e})')
 
     # COMPARISON TABLE
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
