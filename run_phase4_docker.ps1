@@ -16,6 +16,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ── Model selection ───────────────────────────────────────────────────────────
+# The gate model (what the alert decision is made on) is versioned; the scaler,
+# imputer medians and Tier-2 Bot specialist are shared by every gate.  v3 is the
+# promoted gate: at the deployed false-positive budget it matches v1 on Bot and
+# DDoS recall while lifting cross-environment DDoS recall from 12.5% to 51.4%
+# (backend/ml/eval_bot_behind_gate.py).
+#
+# The ALERT CUT travels with the gate: v3's scores sit much lower, so v3 at
+# v1's cut of 0.65 detects 0 of 570 held-out Bot flows.  The detector reads
+# backend/realtime/thresholds.json (0.2575 for v3, calibrated at the deployed
+# 3.65% BENIGN FPR budget) unless ML_THRESHOLD is set here.
+#
+# Roll back to the v1 gate with:  $GateModels = "hdfs://namenode:8020/threvia/models_clean"
+# and re-point the cut (ML_THRESHOLD=0.65 or a v1 thresholds.json).
+$GateModels   = "hdfs://namenode:8020/threvia/models_clean_v3"
+$SharedModels = "hdfs://namenode:8020/threvia/models_clean"
+$GateHdfsPath = $GateModels.Replace("hdfs://namenode:8020", "")
+
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  THREVIA PHASE 4 - REAL-TIME DETECTION" -ForegroundColor Cyan
 Write-Host "  Mode: $Mode" -ForegroundColor Cyan
@@ -37,9 +55,9 @@ Write-Host "SUCCESS: Docker containers are running" -ForegroundColor Green
 if ($Mode -eq "detect" -or $Mode -eq "all") {
     Write-Host "`nINFO: Verifying trained models on HDFS..." -ForegroundColor Yellow
     
-    $modelCheck = docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean/rf_binary 2>$null
+    $modelCheck = docker exec threvia-namenode hdfs dfs -test -e "$GateHdfsPath/rf_binary" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Trained models not found on HDFS." -ForegroundColor Red
+        Write-Host "ERROR: Trained models not found on HDFS at $GateHdfsPath" -ForegroundColor Red
         Write-Host "  Run Phase 3 first to train the models:" -ForegroundColor Yellow
         Write-Host "  docker exec threvia-spark-master spark-submit --master spark://spark-master:7077 /workspace/backend/ml/train_clean_corpus.py" -ForegroundColor Yellow
         exit 1
@@ -80,7 +98,7 @@ switch ($Mode) {
         Write-Host "Make sure simulator is running in another terminal!" -ForegroundColor Yellow
         Write-Host "Press Ctrl+C to stop`n" -ForegroundColor Yellow
         docker exec -it threvia-spark-master bash -c `
-            "export PYTHONPATH=/workspace && export MONGO_URI=mongodb://threvia-mongodb:27017/ && /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g /workspace/backend/realtime/streaming_detector.py"
+            "export PYTHONPATH=/workspace && export MONGO_URI=mongodb://threvia-mongodb:27017/ && export THREVIA_MODELS_DIR=$GateModels && export THREVIA_SHARED_DIR=$SharedModels && /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g /workspace/backend/realtime/streaming_detector.py"
     }
     
     "all" {
@@ -102,7 +120,7 @@ switch ($Mode) {
         Write-Host "Starting detector...`n" -ForegroundColor Green
         try {
             docker exec -it threvia-spark-master bash -c `
-                "export PYTHONPATH=/workspace && export MONGO_URI=mongodb://threvia-mongodb:27017/ && /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g /workspace/backend/realtime/streaming_detector.py"
+                "export PYTHONPATH=/workspace && export MONGO_URI=mongodb://threvia-mongodb:27017/ && export THREVIA_MODELS_DIR=$GateModels && export THREVIA_SHARED_DIR=$SharedModels && /opt/spark/bin/spark-submit --master local[2] --driver-memory 1g /workspace/backend/realtime/streaming_detector.py"
         }
         finally {
             Write-Host "`nStopping simulator..." -ForegroundColor Yellow

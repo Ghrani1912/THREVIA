@@ -1,0 +1,128 @@
+{
+  "generated_at": "2026-09-18T05:01:19.967656Z",
+  "generated_by": "backend/ml/train_clean_corpus.py",
+  "models_dir": "hdfs://namenode:8020/threvia/models_clean_v3",
+  "training_rows": 15962883,
+  "weighting": {
+    "scheme": "per-target inverse-frequency, capped",
+    "weight_cap": 100.0,
+    "binary_weights": {
+      "0": 0.6835,
+      "1": 1.8623
+    },
+    "multiclass_weights": {
+      "BENIGN": 0.0976,
+      "Web Attack - Brute Force": 100.0,
+      "Web Attack - Sql Injection": 100.0,
+      "Web Attack - XSS": 100.0,
+      "DDoS": 0.7832,
+      "Bot": 11.6884,
+      "DoS GoldenEye": 30.6886,
+      "DoS slowloris": 70.9525,
+      "SSH-Patator": 11.5704,
+      "FTP-Patator": 5.7517,
+      "DoS Slowhttptest": 10.2676,
+      "DoS Hulk": 0.5606,
+      "Infiltration": 7.0396,
+      "PortScan": 15.6824
+    }
+  },
+  "label_map": {
+    "0": "BENIGN",
+    "1": "DoS Hulk",
+    "2": "DDoS",
+    "3": "FTP-Patator",
+    "4": "Infiltration",
+    "5": "DoS Slowhttptest",
+    "6": "SSH-Patator",
+    "7": "Bot",
+    "8": "PortScan",
+    "9": "DoS GoldenEye",
+    "10": "DoS slowloris",
+    "11": "Web Attack - Brute Force",
+    "12": "Web Attack - XSS",
+    "13": "Web Attack - Sql Injection"
+  },
+  "tests": {
+    "IDS2025": {
+      "binary": {
+        "auc": 0.9693022213308974,
+        "acc": 0.946019819231188,
+        "prec": 0.9476783095793408,
+        "rec": 0.9460198192311882,
+        "f1": 0.9464987780787937
+      },
+      "multi": {
+        "acc": 0.5270608733529347,
+        "prec": 0.5913238152299392,
+        "rec": 0.5270608733529347,
+        "f1": 0.552323064327652
+      }
+    },
+    "PortScan_test": {
+      "binary": {
+        "auc": 1.0,
+        "acc": 0.9979020592944294,
+        "prec": 1.0,
+        "rec": 0.9979020592944294,
+        "f1": 0.9989499281529788
+      },
+      "multi": {
+        "acc": 0.9979020592944294,
+        "prec": 1.0,
+        "rec": 0.9979020592944294,
+        "f1": 0.9989499281529788
+      }
+    },
+    "C1_session_split": {
+      "binary": {
+        "auc": 1.0,
+        "acc": 0.9882573616321496,
+        "prec": 1.0,
+        "rec": 0.9882573616321496,
+        "f1": 0.9940940048333528
+      },
+      "multi": {
+        "acc": 0.9634102471863919,
+        "prec": 1.0,
+        "rec": 0.9634102471863919,
+        "f1": 0.9785902242273677
+      }
+    },
+    "C2_temporal_benign": {
+      "binary": {
+        "auc": 0.0,
+        "acc": 0.9823177641787402,
+        "prec": 1.0,
+        "rec": 0.9823177641787402,
+        "f1": 0.9910800194899199
+      },
+      "multi": {
+        "acc": 0.8499886674686612,
+        "prec": 1.0,
+        "rec": 0.8499886674686612,
+        "f1": 0.9189122965079568
+      }
+    }
+  },
+  "temporal_benign_holdout": {
+    "rows": 286785,
+    "false_positives": 5071,
+    "fpr": 0.017682,
+    "fpr_percent": 1.77
+  },
+  "per_class_recall": {
+    "C1_session_split": {
+      "DDoS": {
+        "support": 38348,
+        "correct": 37333,
+        "recall": 0.9735
+      },
+      "Bot": {
+        "support": 570,
+        "correct": 161,
+        "recall": 0.2825
+      }
+    }
+  }
+}

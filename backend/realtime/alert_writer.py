@@ -307,6 +307,30 @@ class AlertWriter:
         logger.info("ML alerts inserted: %d", len(result.inserted_ids))
         return len(result.inserted_ids)
 
+    def write_manual_review_bulk(self, alerts: list[dict]) -> int:
+        """
+        Bulk-insert flows routed to manual review instead of auto-flagging.
+
+        Populated by the Infiltration-label suppression mitigation: the
+        multiclass RF's "Infiltration" verdict was false 980/986 times on the
+        streamed corpus (76% of all remaining FPs), so those flows are parked
+        here for a human rather than raising alerts.  These documents never
+        appear in the dashboard alert feed.
+
+        Accepts the same dict shape as ``write_ml_alerts_bulk``; ``type`` is
+        set to ``manual_review`` and the collection carries the same 72h TTL.
+        Returns the number of documents inserted.
+        """
+        if not alerts:
+            return 0
+        now = datetime.now(timezone.utc)
+        for doc in alerts:
+            doc.setdefault("type", "manual_review")
+            doc.setdefault("created_at", now)
+        result = self._col("manual_review").insert_many(alerts)
+        logger.info("Manual-review flows inserted: %d", len(result.inserted_ids))
+        return len(result.inserted_ids)
+
     # ── Query helpers (used by the dashboard) ───────────────────────────────
 
     def get_recent_alerts(self, limit: int = 100) -> list[dict]:
@@ -458,6 +482,7 @@ class AlertWriter:
             _COL_BLOOM: TTL_HOURS,
             _COL_ML: TTL_HOURS,
             _COL_NOMINAL: TTL_HOURS,
+            "manual_review": TTL_HOURS,
         }
         for name, hours in ttl_specs.items():
             try:

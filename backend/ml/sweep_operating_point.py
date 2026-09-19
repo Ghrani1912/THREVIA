@@ -139,9 +139,9 @@ def main():
     print(f'  C1 DDoS / Bot     : {n_ddos:,} / {n_bot:,}')
 
     sep('THRESHOLD SWEEP — flag as attack when P(attack) >= T')
-    print(f'  {"T":>5} | {"C2 FPR":>8} | {"IDS atk rec":>11} | {"IDS BEN FPR":>11} | '
-          f'{"DDoS rec":>9} | {"Bot rec":>8} | {"IDS F1(attack)":>14}')
-    print('  ' + '-' * 82)
+    print(f'  {"T":>5} | {"C2 FPR":>8} | {"C2 FP n":>9} | {"IDS atk rec":>11} | {"IDS TP n":>9} | '
+          f'{"IDS FP n":>9} | {"DDoS rec":>9} | {"Bot rec":>8}')
+    print('  ' + '-' * 92)
 
     rows_out = []
     for t in THRESHOLDS:
@@ -152,17 +152,14 @@ def main():
         ids_fp = ids_ben.filter(F.col('p_attack') >= t).count()
         atk_rec = ids_tp / n_ids_atk if n_ids_atk else 0.0
         ben_fpr = ids_fp / n_ids_ben if n_ids_ben else 0.0
-        prec = ids_tp / (ids_tp + ids_fp) if (ids_tp + ids_fp) else 0.0
-        f1 = 2 * prec * atk_rec / (prec + atk_rec) if (prec + atk_rec) else 0.0
 
         ddos_rec = c1_ddos.filter(F.col('p_attack') >= t).count() / n_ddos if n_ddos else 0.0
         bot_rec = c1_bot.filter(F.col('p_attack') >= t).count() / n_bot if n_bot else 0.0
 
-        print(f'  {t:>5.2f} | {c2_fpr * 100:>7.2f}% | {atk_rec * 100:>10.2f}% | '
-              f'{ben_fpr * 100:>10.2f}% | {ddos_rec * 100:>8.2f}% | {bot_rec * 100:>7.2f}% | '
-              f'{f1:>14.4f}')
-        rows_out.append(dict(T=t, c2_fpr=c2_fpr, ids_attack_recall=atk_rec,
-                             ids_benign_fpr=ben_fpr, ids_attack_f1=f1,
+        print(f'  {t:>5.2f} | {c2_fpr * 100:>7.2f}% | {c2_fp:>9,} | {atk_rec * 100:>10.2f}% | '
+              f'{ids_tp:>9,} | {ids_fp:>9,} | {ddos_rec * 100:>8.2f}% | {bot_rec * 100:>7.2f}%')
+        rows_out.append(dict(T=t, c2_fpr=c2_fpr, c2_fp=c2_fp, ids_tp=ids_tp, ids_fp=ids_fp,
+                             ids_attack_recall=atk_rec, ids_benign_fpr=ben_fpr,
                              ddos_recall=ddos_rec, bot_recall=bot_rec))
 
     sep('Reading the curve')

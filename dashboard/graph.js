@@ -1607,7 +1607,7 @@
     });
     if (ind) {
       ind.textContent = name === 'topology' ? 'TOPOLOGY LINK ACTIVE'
-        : (name === 'spectral' ? 'SPECTRAL MODULE OFFLINE' : 'SWEEP ACTIVE: 24 RPM');
+        : (name === 'spectral' ? 'SPECTRAL MODULE ACTIVE' : 'SWEEP ACTIVE: 24 RPM');
       ind.className = name === 'topology' ? 'text-primary font-bold' : 'text-secondary font-bold';
     }
     if (name === 'topology') {
@@ -1616,6 +1616,9 @@
       if (!S.loaded) loadView(S.scope === 'full' ? 'full' : 'threat', S.k);
       else if (!S.drawn.length) rebuild(0);
       setTimeout(resizeCanvas, 40);
+    }
+    if (name === 'spectral' && typeof updateSpectralWaterfall === 'function') {
+      setTimeout(updateSpectralWaterfall, 50);
     }
   }
 

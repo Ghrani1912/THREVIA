@@ -6,14 +6,23 @@
     "All holdout preprocessing uses the saved scaler pipeline + training imputer",
     "medians via clean_and_scale_external (the corrected path)."
   ],
-  "generated_at": "2026-09-17T00:00:00Z",
+  "generated_at": "2026-09-18T00:00:00Z",
   "generated_by": "backend/ml/train_clean_corpus.py (retrain) + manual collation",
   "training_rows": 15694171,
   "label_map": {
-    "0": "BENIGN", "1": "DoS Hulk", "2": "DDoS", "3": "FTP-Patator",
-    "4": "Infiltration", "5": "DoS Slowhttptest", "6": "Bot", "7": "SSH-Patator",
-    "8": "PortScan", "9": "DoS GoldenEye", "10": "DoS slowloris",
-    "11": "Web Attack - Brute Force", "12": "Web Attack - XSS",
+    "0": "BENIGN",
+    "1": "DoS Hulk",
+    "2": "DDoS",
+    "3": "FTP-Patator",
+    "4": "Infiltration",
+    "5": "DoS Slowhttptest",
+    "6": "Bot",
+    "7": "SSH-Patator",
+    "8": "PortScan",
+    "9": "DoS GoldenEye",
+    "10": "DoS slowloris",
+    "11": "Web Attack - Brute Force",
+    "12": "Web Attack - XSS",
     "13": "Web Attack - Sql Injection"
   },
   "weighting": {
@@ -25,13 +34,25 @@
       "correct_binary_attack_weight": 1.9535
     },
     "v2_scheme": "per-target inverse-frequency, capped at 100x",
-    "v2_binary_weights": { "0": 0.672, "1": 1.9535 },
+    "v2_binary_weights": {
+      "0": 0.672,
+      "1": 1.9535
+    },
     "v2_multiclass_weights_capped": {
-      "BENIGN": 0.096, "DoS Hulk": 0.6218, "DDoS": 0.7696, "FTP-Patator": 5.884,
-      "Infiltration": 6.9144, "DoS Slowhttptest": 10.6089, "Bot": 11.4817,
-      "SSH-Patator": 12.0875, "PortScan": 15.4029, "DoS GoldenEye": 41.6934,
-      "DoS slowloris": 100.0, "Web Attack - Brute Force": 100.0,
-      "Web Attack - XSS": 100.0, "Web Attack - Sql Injection": 100.0
+      "BENIGN": 0.096,
+      "DoS Hulk": 0.6218,
+      "DDoS": 0.7696,
+      "FTP-Patator": 5.884,
+      "Infiltration": 6.9144,
+      "DoS Slowhttptest": 10.6089,
+      "Bot": 11.4817,
+      "SSH-Patator": 12.0875,
+      "PortScan": 15.4029,
+      "DoS GoldenEye": 41.6934,
+      "DoS slowloris": 100.0,
+      "Web Attack - Brute Force": 100.0,
+      "Web Attack - XSS": 100.0,
+      "Web Attack - Sql Injection": 100.0
     }
   },
   "versions": {
@@ -47,7 +68,9 @@
     "version_comparison": "backend/ml/compare_model_versions.py (logs: /tmp/compare.log)",
     "threshold_sweeps": "backend/ml/sweep_operating_point.py (logs: /tmp/sweep.log, /tmp/sweep2.log, /tmp/sweep_v1.log)",
     "infiltration_specialist": "backend/ml/train_infiltration_classifier.py (log: /tmp/infil.log)",
-    "class_weight_audit": "backend/ml/audit_class_weights.py"
+    "class_weight_audit": "backend/ml/audit_class_weights.py",
+    "tier2_bot_behind_v3_gate": "backend/ml/eval_bot_behind_gate.py (log: /tmp/bot_gate2.log)",
+    "v3_threshold_calibration": "backend/ml/calibrate_thresholds.py --target-fpr 3.65 (log: /tmp/calib_v3.log) -> backend/realtime/thresholds.json"
   },
   "holdouts": {
     "C1_session_split": "friday_ddos_test + friday_bot_test — 39,918 rows, zero training overlap",
@@ -64,7 +87,7 @@
       "portscan_recall_percent": 99.79,
       "ids2025_binary_accuracy_percent": 85.33,
       "ids2025_attack_recall_percent": 87.89,
-      "ids2025_benign_fpr_percent": 21.10
+      "ids2025_benign_fpr_percent": 21.1
     },
     "v2": {
       "c2_fpr_percent": 0.18,
@@ -80,36 +103,180 @@
   "threshold_sweeps": {
     "_note": "Each row is a raw P(attack) cut. Read the FPR column together with recall; the fixed-T comparison below is misleading on its own.",
     "v1": [
-      { "T": 0.25, "c2_fpr_percent": 51.22, "ids_attack_recall_percent": 99.91, "ids_benign_fpr_percent": 47.73, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.30, "c2_fpr_percent": 45.17, "ids_attack_recall_percent": 99.72, "ids_benign_fpr_percent": 42.72, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.40, "c2_fpr_percent": 32.89, "ids_attack_recall_percent": 94.88, "ids_benign_fpr_percent": 30.40, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.50, "c2_fpr_percent": 18.24, "ids_attack_recall_percent": 87.89, "ids_benign_fpr_percent": 21.10, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.60, "c2_fpr_percent": 10.05, "ids_attack_recall_percent": 66.55, "ids_benign_fpr_percent": 14.47, "ddos_recall_percent": 99.98, "bot_recall_percent": 99.82 },
-      { "T": 0.65, "c2_fpr_percent": 6.79, "ids_attack_recall_percent": 61.66, "ids_benign_fpr_percent": 10.36, "ddos_recall_percent": 99.97, "bot_recall_percent": 99.47 },
-      { "T": 0.70, "c2_fpr_percent": 4.21, "ids_attack_recall_percent": 52.45, "ids_benign_fpr_percent": 7.86, "ddos_recall_percent": 99.94, "bot_recall_percent": 99.12 },
-      { "T": 0.75, "c2_fpr_percent": 2.43, "ids_attack_recall_percent": 47.45, "ids_benign_fpr_percent": 6.79, "ddos_recall_percent": 99.89, "bot_recall_percent": 98.25 },
-      { "T": 0.80, "c2_fpr_percent": 0.83, "ids_attack_recall_percent": 46.85, "ids_benign_fpr_percent": 6.07, "ddos_recall_percent": 99.86, "bot_recall_percent": 94.39 },
-      { "T": 0.90, "c2_fpr_percent": 0.23, "ids_attack_recall_percent": 45.93, "ids_benign_fpr_percent": 5.08, "ddos_recall_percent": 99.53, "bot_recall_percent": 56.32 }
+      {
+        "T": 0.25,
+        "c2_fpr_percent": 51.22,
+        "ids_attack_recall_percent": 99.91,
+        "ids_benign_fpr_percent": 47.73,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.3,
+        "c2_fpr_percent": 45.17,
+        "ids_attack_recall_percent": 99.72,
+        "ids_benign_fpr_percent": 42.72,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.4,
+        "c2_fpr_percent": 32.89,
+        "ids_attack_recall_percent": 94.88,
+        "ids_benign_fpr_percent": 30.4,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.5,
+        "c2_fpr_percent": 18.24,
+        "ids_attack_recall_percent": 87.89,
+        "ids_benign_fpr_percent": 21.1,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.6,
+        "c2_fpr_percent": 10.05,
+        "ids_attack_recall_percent": 66.55,
+        "ids_benign_fpr_percent": 14.47,
+        "ddos_recall_percent": 99.98,
+        "bot_recall_percent": 99.82
+      },
+      {
+        "T": 0.65,
+        "c2_fpr_percent": 6.79,
+        "ids_attack_recall_percent": 61.66,
+        "ids_benign_fpr_percent": 10.36,
+        "ddos_recall_percent": 99.97,
+        "bot_recall_percent": 99.47
+      },
+      {
+        "T": 0.7,
+        "c2_fpr_percent": 4.21,
+        "ids_attack_recall_percent": 52.45,
+        "ids_benign_fpr_percent": 7.86,
+        "ddos_recall_percent": 99.94,
+        "bot_recall_percent": 99.12
+      },
+      {
+        "T": 0.75,
+        "c2_fpr_percent": 2.43,
+        "ids_attack_recall_percent": 47.45,
+        "ids_benign_fpr_percent": 6.79,
+        "ddos_recall_percent": 99.89,
+        "bot_recall_percent": 98.25
+      },
+      {
+        "T": 0.8,
+        "c2_fpr_percent": 0.83,
+        "ids_attack_recall_percent": 46.85,
+        "ids_benign_fpr_percent": 6.07,
+        "ddos_recall_percent": 99.86,
+        "bot_recall_percent": 94.39
+      },
+      {
+        "T": 0.9,
+        "c2_fpr_percent": 0.23,
+        "ids_attack_recall_percent": 45.93,
+        "ids_benign_fpr_percent": 5.08,
+        "ddos_recall_percent": 99.53,
+        "bot_recall_percent": 56.32
+      }
     ],
     "v2": [
-      { "T": 0.10, "c2_fpr_percent": 28.49, "ids_attack_recall_percent": 61.62, "ids_benign_fpr_percent": 13.42, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.15, "c2_fpr_percent": 12.64, "ids_attack_recall_percent": 56.86, "ids_benign_fpr_percent": 9.80, "ddos_recall_percent": 100.0, "bot_recall_percent": 100.0 },
-      { "T": 0.20, "c2_fpr_percent": 6.38, "ids_attack_recall_percent": 52.50, "ids_benign_fpr_percent": 7.44, "ddos_recall_percent": 100.0, "bot_recall_percent": 99.82 },
-      { "T": 0.25, "c2_fpr_percent": 4.07, "ids_attack_recall_percent": 50.83, "ids_benign_fpr_percent": 6.24, "ddos_recall_percent": 99.98, "bot_recall_percent": 99.30 },
-      { "T": 0.30, "c2_fpr_percent": 3.69, "ids_attack_recall_percent": 49.75, "ids_benign_fpr_percent": 5.82, "ddos_recall_percent": 99.95, "bot_recall_percent": 98.95 },
-      { "T": 0.35, "c2_fpr_percent": 2.67, "ids_attack_recall_percent": 46.42, "ids_benign_fpr_percent": 5.27, "ddos_recall_percent": 99.91, "bot_recall_percent": 93.51 },
-      { "T": 0.40, "c2_fpr_percent": 1.27, "ids_attack_recall_percent": 45.74, "ids_benign_fpr_percent": 5.00, "ddos_recall_percent": 99.85, "bot_recall_percent": 67.72 },
-      { "T": 0.45, "c2_fpr_percent": 0.26, "ids_attack_recall_percent": 45.47, "ids_benign_fpr_percent": 4.74, "ddos_recall_percent": 99.83, "bot_recall_percent": 58.77 },
-      { "T": 0.50, "c2_fpr_percent": 0.18, "ids_attack_recall_percent": 45.43, "ids_benign_fpr_percent": 4.45, "ddos_recall_percent": 99.82, "bot_recall_percent": 32.98 }
+      {
+        "T": 0.1,
+        "c2_fpr_percent": 28.49,
+        "ids_attack_recall_percent": 61.62,
+        "ids_benign_fpr_percent": 13.42,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.15,
+        "c2_fpr_percent": 12.64,
+        "ids_attack_recall_percent": 56.86,
+        "ids_benign_fpr_percent": 9.8,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 100.0
+      },
+      {
+        "T": 0.2,
+        "c2_fpr_percent": 6.38,
+        "ids_attack_recall_percent": 52.5,
+        "ids_benign_fpr_percent": 7.44,
+        "ddos_recall_percent": 100.0,
+        "bot_recall_percent": 99.82
+      },
+      {
+        "T": 0.25,
+        "c2_fpr_percent": 4.07,
+        "ids_attack_recall_percent": 50.83,
+        "ids_benign_fpr_percent": 6.24,
+        "ddos_recall_percent": 99.98,
+        "bot_recall_percent": 99.3
+      },
+      {
+        "T": 0.3,
+        "c2_fpr_percent": 3.69,
+        "ids_attack_recall_percent": 49.75,
+        "ids_benign_fpr_percent": 5.82,
+        "ddos_recall_percent": 99.95,
+        "bot_recall_percent": 98.95
+      },
+      {
+        "T": 0.35,
+        "c2_fpr_percent": 2.67,
+        "ids_attack_recall_percent": 46.42,
+        "ids_benign_fpr_percent": 5.27,
+        "ddos_recall_percent": 99.91,
+        "bot_recall_percent": 93.51
+      },
+      {
+        "T": 0.4,
+        "c2_fpr_percent": 1.27,
+        "ids_attack_recall_percent": 45.74,
+        "ids_benign_fpr_percent": 5.0,
+        "ddos_recall_percent": 99.85,
+        "bot_recall_percent": 67.72
+      },
+      {
+        "T": 0.45,
+        "c2_fpr_percent": 0.26,
+        "ids_attack_recall_percent": 45.47,
+        "ids_benign_fpr_percent": 4.74,
+        "ddos_recall_percent": 99.83,
+        "bot_recall_percent": 58.77
+      },
+      {
+        "T": 0.5,
+        "c2_fpr_percent": 0.18,
+        "ids_attack_recall_percent": 45.43,
+        "ids_benign_fpr_percent": 4.45,
+        "ddos_recall_percent": 99.82,
+        "bot_recall_percent": 32.98
+      }
     ]
   },
   "class_findings": {
     "bot": {
-      "tier1_multiclass_recall_C1_percent": { "v1": 68.25, "v2": 67.89 },
+      "tier1_multiclass_recall_C1_percent": {
+        "v1": 68.25,
+        "v2": 67.89
+      },
       "support": 570,
-      "tier1_at_deployed_cut_percent": { "v1_T0.65": 99.47, "v2_T0.65": 0.0 },
-      "finding": "The 65-68% figure is the Tier-1 multiclass label only. The binary model at the deployed cut flags 99.47% of held-out Bot flows, and the Tier-2 rf_bot_binary specialist was separately measured at 95.56% precision / 100% recall on the streamed corpus.",
-      "caution": "Bot recall collapses when the cut is raised on the RETRAINED model (0% at T>=0.60). Do not pair v2 with T=0.65."
+      "tier1_binary_gate_recall_at_deployed_cut_percent": {
+        "v1_T0.65": 59.82,
+        "v3_T0.65": 0.0
+      },
+      "tier1_at_deployed_cut_percent_RETRACTED": {
+        "v1_T0.65": 99.47,
+        "v2_T0.65": 0.0,
+        "why_retracted": "Measured before the Fwd-Header-Length rename fix. On that path every Friday-derived row (Bot rows included) had a canonical column nulled and median-imputed, which shifted the whole score distribution up by roughly +0.3; the same defect produced the 18.24%/6.79% C2 FPR pair later traced and corrected in documentation_discrepancy. The canonical-path value is the 59.82% above."
+      },
+      "finding": "The 65-68% figure was the Tier-1 multiclass label only, and the binary gate's true held-out Bot recall at the deployed cut is 59.82% (not 99.47% - see tier1_at_deployed_cut_percent_RETRACTED). The Tier-2 rf_bot_binary specialist then accepts 100% of the Bot flows the gate passes, so the gate is the binding constraint and the end-to-end Bot recall is simply the gate's. The specialist's own 95.56% precision / 100% recall figure was measured on the streamed corpus at P(Bot|flagged)=0.0222 with no gate in front of it; on friday_bot_test + the C2 BENIGN holdout (287,355 rows, P(Bot)=0.0020) its 0.50 cut scores 64.67% precision / 60.70% recall standalone.",
+      "caution": "A gate and its cut are not interchangeable across retrains. v3 at v1's 0.65 cut flags 0.16% of the clean BENIGN holdout and passes 0 of 570 held-out Bot flows to the specialist (0.0% end-to-end). Always pair a gate with the cut calibrated for it - backend/realtime/thresholds.json."
     },
     "infiltration": {
       "reported_historical_percent": 68.97,
@@ -119,7 +286,7 @@
         "benign_rows": 288566,
         "tier1_multiclass_recall_percent": 77.78,
         "tier3_rules_recall_percent": 41.67,
-        "tier3_rules_benign_fp_percent": 7.40,
+        "tier3_rules_benign_fp_percent": 7.4,
         "specialist_recall_percent": 19.44,
         "specialist_benign_fp_percent": 0.67,
         "specialist_auc": 0.9654
@@ -134,11 +301,199 @@
   },
   "deployment_recommendation": {
     "promote_v2": false,
-    "keep": "v1 models_clean at alert threshold P(attack) >= 0.65",
-    "reason": "No measured discrimination gain at matched FPR, and v2 at T=0.65 loses Bot detection entirely. Re-run sweep_operating_point.py before changing either the models or the cut."
+    "promote_v3": true,
+    "gate": "hdfs://namenode:8020/threvia/models_clean_v3 (rf_binary + rf_multiclass)",
+    "shared_artifacts": "hdfs://namenode:8020/threvia/models_clean (scaler_pipeline, imputer_medians, rf_bot_binary)",
+    "alert_threshold": 0.2575,
+    "threshold_artifact": "backend/realtime/thresholds.json",
+    "reason": "v2 had no discrimination gain at matched FPR and lost Bot entirely at T=0.65. v3 is different: at the deployed false-positive budget (3.65% C2 BENIGN FPR, where v1's shipped T=0.65 sits) it is level with v1 on end-to-end Bot recall (60.18% vs 60.00%) and on C1 DDoS (99.9% both) while lifting cross-environment DDoS recall on the uncontaminated CIC-DDoS2019 probe from 12.52% to 51.43% (ROC-AUC 0.4916 -> 0.7025). THE CUT MUST MOVE WITH THE MODEL: v3 at 0.65 detects 0 of 570 held-out Bot flows.",
+    "rollback": "THREVIA_MODELS_DIR=hdfs://namenode:8020/threvia/models_clean plus ML_THRESHOLD=0.65 (or a v1 thresholds.json). The v1 gate still wins at strict operating points - see tier2_bot_behind_gate.roc_crossing.",
+    "remaining_weakness": "At C2 FPR <= 2% v1 dominates v3 on both axes (Bot 56.3/57.9/59.3% vs 24.4/27.5/31.1%; CIC-DDoS2019 DDoS 3.21/4.65/6.17% vs 1.90/2.12/3.30%). The promotion is justified only at the deployed 3.65% budget, not at a tighter one."
+  },
+  "tier2_bot_behind_gate": {
+    "_README": [
+      "Does v3 keep Bot detection alive once the Tier-2 specialist is measured BEHIND the gate?",
+      "The specialist is only consulted for flows the Tier-1 binary gate already",
+      "flagged, so end-to-end Bot recall = gate recall x specialist acceptance, and a",
+      "gate that misses Bot flows loses them before the specialist is asked.",
+      "Produced by backend/ml/eval_bot_behind_gate.py (log: /tmp/bot_gate2.log),",
+      "all at matched C2 BENIGN false-positive rate. Every number measured."
+    ],
+    "supports": {
+      "friday_benign_c2": 286785,
+      "friday_bot_test": 570,
+      "friday_ddos_test": 38348,
+      "ddos2019_test": "306,201 (254,797 attack / 51,404 BENIGN), 0.000% fingerprint overlap with training",
+      "note": "friday_bot_test is a row-level randomSplit of the Friday Bot capture, so near-duplicate flows straddle it; treat its recall as an upper bound, as eval_bot_heldout.py does."
+    },
+    "at_matched_c2_fpr": {
+      "0.50_percent": {"v1": {"T": 0.794, "e2e_bot_recall": 56.32, "ddos19_ddos_recall": 3.21, "ddos19_benign_fpr": 4.9}, "v3": {"T": 0.574, "e2e_bot_recall": 24.39, "ddos19_ddos_recall": 1.90, "ddos19_benign_fpr": 0.4}},
+      "1.00_percent": {"v1": {"T": 0.745, "e2e_bot_recall": 57.89, "ddos19_ddos_recall": 4.65, "ddos19_benign_fpr": 10.3}, "v3": {"T": 0.551, "e2e_bot_recall": 27.54, "ddos19_ddos_recall": 2.12, "ddos19_benign_fpr": 1.1}},
+      "2.00_percent": {"v1": {"T": 0.699, "e2e_bot_recall": 59.30, "ddos19_ddos_recall": 6.17, "ddos19_benign_fpr": 15.6}, "v3": {"T": 0.477, "e2e_bot_recall": 31.05, "ddos19_ddos_recall": 3.30, "ddos19_benign_fpr": 4.6}},
+      "3.65_percent_DEPLOYED_BUDGET": {"v1": {"T": 0.649, "e2e_bot_recall": 60.00, "ddos19_ddos_recall": 12.52, "ddos19_benign_fpr": 25.8}, "v3": {"T": 0.258, "e2e_bot_recall": 60.18, "ddos19_ddos_recall": 51.43, "ddos19_benign_fpr": 23.9}},
+      "5.00_percent": {"v1": {"T": 0.626, "e2e_bot_recall": 60.00, "ddos19_ddos_recall": 15.36, "ddos19_benign_fpr": 34.3}, "v3": {"T": 0.197, "e2e_bot_recall": 60.18, "ddos19_ddos_recall": 75.27, "ddos19_benign_fpr": 43.6}},
+      "_note": "v1's matched cut for its own deployed FPR budget comes out at T=0.649 against a shipped T=0.65 - the method reproduces the live operating point, which is the check that the comparison is anchored where the pipeline actually runs."
+    },
+    "roc_crossing": "v3's advantage is not a blanket improvement: the two ROCs cross near 3% C2 FPR. Below it v1 wins on BOTH end-to-end Bot and cross-environment DDoS; above it v3 wins both. The deployed v1 cut (0.65) sits at 3.65% C2 FPR, i.e. just past the crossing - so the promotion is conditional on the budget, not unconditional.",
+    "bot_specialist_standalone_on_the_hard_holdout": {
+      "holdout": "friday_bot_test (570 Bot) + friday_benign_c2 (286,785 BENIGN) = 287,355 rows, P(Bot)=0.0020",
+      "cut_0.50": {"labelled": 535, "truly_bot": 346, "precision_percent": 64.67, "recall_percent": 60.70, "benign_false_positives": 189},
+      "gate_passed_bot_acceptance_percent": 100.0,
+      "finding": "The specialist never rejects a Bot flow the gate passes, so it adds no Bot recall of its own; its only live effect is the 189 BENIGN flows it relabels as Bot."
+    },
+    "at_the_deployed_cut_0_65_raw": {
+      "v1": {"c2_fpr_percent": 3.65, "e2e_bot_recall": 59.82, "bot_labelled_c2_fp": 189, "ddos19_ddos_recall": 12.52},
+      "v3": {"c2_fpr_percent": 0.16, "e2e_bot_recall": 0.0, "bot_labelled_c2_fp": 0, "ddos19_ddos_recall": 1.75},
+      "finding": "This is the trap the promotion had to avoid: the raw cut is not portable between gates."
+    },
+    "calibration_of_the_promoted_gate": {
+      "script": "backend/ml/calibrate_thresholds.py --target-fpr 3.65 with MODELS_DIR=models_clean_v3",
+      "attack_threshold": 0.257502,
+      "measured_fpr_percent": 3.7314,
+      "measured_recall_percent": {"friday_ddos_test": 99.9113, "friday_bot_test": 60.1754},
+      "severity_ladder_benign_anchored": {"medium": 0.257502, "high": 0.493131, "critical": 0.583068},
+      "why_severity_was_re_derived": "Severity is read off P(attack), so a rescaled gate silently empties the Critical/High buckets the dashboard counts. Each step is anchored to a fraction of the tolerated benign rate (F, F/2, F/10) so the ladder stays comparable across gates."
+    },
+    "deployed_pipeline_on_the_replay_corpus": {
+      "_note": "Same method, same input (corpus/demo_balanced_150k_fixed, 113,928 flows: 75,000 BENIGN / 37,500 DDoS / 1,428 Bot), one gate and cut per row. Script: backend/ml/measure_stream_fpr.py (logs /tmp/stream_fpr_v1.log, /tmp/stream_fpr_v3.log).",
+      "v1_at_0_65": {"alerts": 40790, "false_positive_flows": 2422, "fpr_percent": 3.23, "recall_percent": 98.56, "precision_percent": 94.06, "bot_rows_passing_the_gate": 905, "empirical_p_bot_given_flagged": 0.0222},
+      "v3_at_0_2575": {"alerts": 41473, "false_positive_flows": 3116, "fpr_percent": 4.15, "recall_percent": 98.53, "precision_percent": 92.49, "bot_rows_passing_the_gate": 880, "empirical_p_bot_given_flagged": 0.0212},
+      "reading": "On this synthetic, CIC-2017-derived balanced replay the promotion is mildly negative on its own terms: +694 benign false positives (+0.92 pp FPR), recall unchanged (98.53% vs 98.56%), precision -1.57 pp. The benefit v3 buys is invisible here by construction - this corpus comes from the same capture environment the v1 models were trained on - and shows up only on the cross-environment probe (CIC-DDoS2019 DDoS recall 12.52% -> 51.43% at matched C2 FPR). Bot is essentially unchanged (gate pass 63.4% -> 61.6%).",
+      "why_the_anchors_differ": "The cut is matched on the clean C2 temporal holdout (3.73% there), which lands at 4.15% on the replay corpus because the replay corpus has a different, synthetic BENIGN mix. Matching on the replay corpus instead would need T~=0.35, which on C1 puts v3's Bot gate recall on a cliff (31.75% at T=0.40, 59.30% at T=0.315) and buys nothing the C2 anchor does not already justify.",
+      "cross_check": "The v1 row independently reproduces two numbers published elsewhere: the streamed-corpus 3.26% FPR at T=0.65 (measured here as 3.23%) and P(Bot|flagged)=0.0222 from detection_policy.py (measured here as 0.0222)."
+    },
+    "sources": {
+      "gate_measurement": "backend/ml/eval_bot_behind_gate.py (log: /tmp/bot_gate2.log)",
+      "calibration": "backend/ml/calibrate_thresholds.py (log: /tmp/calib_v3.log)",
+      "deployed_pipeline_fpr": "backend/ml/measure_stream_fpr.py (logs: /tmp/stream_fpr_v3.log, /tmp/stream_fpr_v1.log)",
+      "specialist_standalone": "backend/ml/eval_bot_heldout.py"
+    }
   },
   "documentation_discrepancy": {
-    "note": "FINAL_MODEL_EVALUATION.md reports 12.87% C2 FPR at T=0.50 and 3.65% at T=0.65. Measured with the corrected preprocessing path (saved scaler + training imputer medians), the reproducible values are 18.24% at T=0.50 and 6.79% at T=0.65 — the same numbers the document attributes to the 'broken scaler' run.",
-    "action": "Treat the C2 FPR figures in that document as unreproducible until re-derived."
+    "resolved": true,
+    "root_cause": "The 18.24%/6.79% figures previously reported here as 'the reproducible values' were themselves the artifact. The evaluation sweep scripts pre-selected columns before cleaning, so rows missing the canonical 'Fwd Header Length' (all Friday parquets carry only the FwdHeaderLength34/55 duplicates) were silently null'd and median-imputed, making benign rows look like median-FHL attack training rows. With the rename applied (now fixed inside clean_and_scale_external's callers), v1 reproduces the documented table exactly.",
+    "verified_reproduction": {
+      "T=0.50": "12.87% C2 FPR (documented) - reproduced",
+      "T=0.65": "3.65% C2 FPR (documented) - reproduced",
+      "T=0.75": "0.99% C2 FPR (documented) - reproduced",
+      "source_log": "sweep_v1c (backend/ml/sweep_operating_point.py, FHL-rename-fixed path)"
+    },
+    "action": "The documented 12.87%/3.65% figures are the faithful ones. Earlier claims of non-reproducibility in this artifact and in the Sept-17 doc section are retracted."
+  },
+  "infiltration_split_evaluation": {
+    "split": "Temporal 50/50 split of the 161,934 CICIDS2018 Infiltration rows (boundary = median timestamp; no source-IP column exists, so session grouping is impossible). Test side de-leaked on canonical-feature hash: 4,558 of 72,022 test rows shared a hash with the train side and were removed.",
+    "support": {
+      "train_rows_early": 73146,
+      "test_rows_late_deleaked": 67464,
+      "previous_supports": "IDS2025: 29 rows; CIC-2017 Thursday: 36 rows"
+    },
+    "deployed_v1_models_note": "v1 trained on ALL Infiltration rows, so 99.97% Tier-1 recall on the test side is IN-SAMPLE (upper bound), not a generalisation claim.",
+    "tier1_multiclass_in_sample": {
+      "recall_percent": 99.97,
+      "tp": 67445,
+      "n": 67464
+    },
+    "tier3_rules": {
+      "recall_percent": 0.0,
+      "tp": 0,
+      "n": 67464,
+      "benign_fpr_percent": 11.443,
+      "benign_fp": 32817,
+      "benign_n": 286785
+    },
+    "specialist_split_aware_leak_free": {
+      "model": "models_clean_v2/rf_infiltration_splitaware (trained on early side only)",
+      "recall_percent": 99.99,
+      "tp": 67454,
+      "n": 67464,
+      "benign_fpr_percent": 1.198,
+      "benign_fp": 3437,
+      "benign_n": 286785,
+      "note": "First leak-free Infiltration measurement in the project. Same-source temporal holdout; near-perfect recall reflects that Infiltration flows are highly distinctive within their own source, NOT cross-source skill. Cross-dataset generalisation remains unproven (see the 36-row CIC-2017 check)."
+    },
+    "cross_dataset_generalization_check_36_rows": {
+      "status": "demoted to secondary evidence; supports too small to separate detectors"
+    },
+    "production_mitigation": {
+      "action": "Infiltration-label suppression routed to manual_review collection",
+      "justification": "980/986 Infiltration-labelled streamed flows were truly BENIGN (76% of residual FPs); 7.44% BENIGN FPR confirmed on C2 holdout (21,342/286,785)",
+      "config": "SUPPRESS_INFILTRATION=false to disable; on by default"
+    }
+  },
+  "corpus_data_audit_v3": {
+    "_README": [
+      "Step-1 DATA audit plus a data-selection retrain (models_clean_v3).",
+      "Produced by backend/ml/audit_corpus_sources.py,",
+      "backend/ml/audit_corpus_leakage.py, backend/ml/build_corpus_v3.py and",
+      "backend/ml/compare_at_matched_fpr.py. Every number below is measured."
+    ],
+    "duplicates": {
+      "total_rows": 15694171,
+      "distinct_feature_vectors": 12431282,
+      "duplicate_excess_rows": 3262889,
+      "duplicate_excess_percent": 20.8,
+      "largest_group_multiplicity": 132723,
+      "largest_group_labels": "FTP-Patator=85,926 and DoS Slowhttptest=46,512 share ONE identical 78-feature vector",
+      "finding": "The corpus contains rows that are bit-identical but labelled differently. No classifier can separate them. This is the mechanical cause of the long-standing 'DoS Slowhttptest is ~55% misclassified as FTP-Patator' symptom, and it is irreducible error, not a model defect.",
+      "other_degenerate_groups": "BENIGN groups of 30,813 / 25,772 / 10,292 / 8,752 identical rows"
+    },
+    "source_monopoly": {
+      "lycos_share_percent": 87.0,
+      "single_source_classes": ["DoS Hulk", "FTP-Patator", "SSH-Patator", "DoS slowloris", "DoS GoldenEye", "DoS Slowhttptest", "Web Attack - Brute Force", "Web Attack - XSS", "Web Attack - Sql Injection"],
+      "finding": "Seven of fourteen classes were trained on LycoS and ONLY LycoS (measured via the 5 canonical columns LycoS lacks: rows sitting on the imputed median).",
+      "unused_datasets_in_data_folder": {
+        "new_dos": "CIC-DDoS2019, 431,371 rows, SAME CICFlowMeter schema (mappable) - but its parquet exports have no Destination Port, so it is used as a HOLDOUT only, never as training data",
+        "botnet": "CTU-13, Argus binetflow (11 columns: dur/proto/dir/state/tos/pkts/bytes)",
+        "UNSW-NB15": "Bro/Argus, 49 features including categoricals",
+        "verdict": "CTU-13 and UNSW-NB15 CANNOT be merged into this model at all - they do not share the 78-feature CICFlowMeter schema and would need a separate feature pipeline and a separate model. That is the answer to 'did I pick the wrong datasets': two of the three, yes, but they were never usable here in the first place."
+      },
+      "unused_compatible_data_that_was_simply_not_merged": {
+        "what": "CIC-2017 Tuesday (FTP/SSH-Patator), Wednesday (DoS Hulk/GoldenEye/slowloris/Slowhttptest), Thursday (Web Attacks, Infiltration)",
+        "rows_added": 268712,
+        "note": "The Friday files are deliberately excluded because the C1 holdout (friday_ddos_test, friday_bot_test) and the port-grouped PortScan holdout are split out of them."
+      }
+    },
+    "holdout_contamination_finding": {
+      "ids2025": "NOT a cross-source set. 86.9% of its PortScan rows, 63.9% of its Bot rows, and - after the v3 CIC-2017 additions - 75.9% of its DoS/DDoS rows and 53.0% of its Brute Force rows are the SAME PHYSICAL FLOWS as the training data (exact fingerprint match on 16 encoding-stable canonical columns).",
+      "action": "IDS2025 must stop being used as a generalisation probe. Its apparent v3 gains (Brute Force 0.12% -> 82.84%) are leakage, NOT improvement.",
+      "clean_replacement": "corpus/ddos2019_test - CIC-DDoS2019's own testing split, 306,201 rows (254,797 DDoS / 51,404 BENIGN). Measured 0.000% fingerprint overlap against corpus/train, cic17_extra and the Friday splits.",
+      "friday_c2_is_sound": "0 of 286,785 C2 BENIGN rows appear in benign_train, so the temporal C2 FPR anchor is trustworthy."
+    },
+    "data_bug_fixed_label_encoding": {
+      "what": "All 2,180 CIC-2017 Thursday Web Attack rows were being silently dropped.",
+      "cause": "The label separator is the UTF-8 replacement character U+FFFD (bytes EF BF BD) - an earlier spreadsheet round-trip destroyed the en-dash. The LABEL_NORMALISE entries written as 'WEB ATTACK \\x96 ...' can never match that, and no reader encoding recovers it (Latin-1 only turns one bad character into three).",
+      "fix": "schema_maps.label_lookup_key() collapses every non-ASCII character to '-', so those labels land on the existing ASCII 'WEB ATTACK - ...' keys. Verified: Web Attack rows merged went 0 -> 2,180."
+    },
+    "v3_training": {
+      "rows": 15962883,
+      "base": "corpus/train + corpus/cic17_extra",
+      "models_dir": "hdfs://namenode:8020/threvia/models_clean_v3",
+      "relation_to_v2": "v3 keeps v2's corrected per-target capped weights; the only change is the added CIC-2017 attack sources."
+    },
+    "clean_cross_environment_result": {
+      "probe": "corpus/ddos2019_test (0% leakage)",
+      "roc_auc": {"v1": 0.4916, "v3": 0.7025},
+      "interpretation": "The deployed v1 model is at CHANCE (AUC 0.49) at telling new-environment DDoS from new-environment BENIGN. v3 lifts that to 0.70. This is the one uncontaminated demonstration that the data-selection repair improved real generalisation.",
+      "at_equal_c2_fpr_0_50_percent": {"ddos19_benign_fpr": {"v1": 4.86, "v3": 0.44}, "ddos19_ddos_recall": {"v1": 2.23, "v3": 1.81}},
+      "at_equal_c2_fpr_5_percent": {"ddos19_ddos_recall": {"v1": 8.43, "v3": 66.47}, "ddos19_benign_fpr": {"v1": 34.34, "v3": 43.62}}
+    },
+    "regression": {
+      "tier1_bot_recall_at_c2_fpr_0_25_percent": {"v1": 58.73, "v3": 3.84},
+      "tier1_bot_recall_on_C1_at_0_50_percent": {"v1": 56.32, "v3": 24.39},
+      "finding": "v3 trades Tier-1 Bot recall for cross-environment DDoS discrimination. Bot is nominally covered by the Tier-2 rf_bot_binary specialist, so this must be re-measured on the v3 gate before switching models.",
+      "resolved_by_tier2_bot_behind_gate": "Measured (see tier2_bot_behind_gate). At the deployed false-positive budget the trade is a tie on Bot (60.18% vs 60.00% end-to-end) and a 4x win on cross-environment DDoS (51.43% vs 12.52%), but only once v3's cut is re-derived to 0.2575. At strict cuts (<=2% C2 FPR) v1 still wins on both."
+    },
+    "stable_on_existing_clean_holdouts": {
+      "C1_ddos_recall": {"v1": 99.80, "v3": 99.82},
+      "portscan_test_recall": {"v1": 99.81, "v3": 99.77},
+      "c2_fpr_at_default_cut_0_50": {"v1": 18.24, "v2": 0.18, "v3": 1.77}
+    },
+    "deployment_recommendation_v3": {
+      "promote_v3": true,
+      "promote_the_pipeline_fixes": true,
+      "reason": "The data repairs are unambiguously correct (label sanitization recovering 2,180 rows; retiring the contaminated IDS2025 probe; the DDOS19 column map; the one-aggregation null imputation that removed ~78 redundant Spark jobs per dataset). The v3 MODEL fixes genuine new-environment DDoS blindness (AUC 0.49 -> 0.70). The follow-up this field asked for - re-measuring the Tier-2 Bot specialist behind the v3 gate - is done: at the deployed false-positive budget v3 is level with v1 on end-to-end Bot recall (60.18% vs 60.00%) and 4x better on cross-environment DDoS (51.43% vs 12.52%). PROMOTED with the cut re-derived to 0.2575 (backend/realtime/thresholds.json); v3 at the old 0.65 cut detects zero Bot.",
+      "hardware_note": "The de-noised corpus rewrite (dropping the 20.8% duplicate rows and down-sampling DoS Hulk) is implemented behind REBUILD_CORPUS=1 in build_corpus_v3.py but cannot complete on this container: a 15.7M-row wide-frame shuffle exceeds its 7.6 GiB cap and is silently OOM-killed (exit 137). Run it with more container memory.",
+      "also": "These evaluations must run with --master spark://spark-master:7077. In local[*] mode the driver shares the master container's 7.6 GiB with the user's long-running realtime simulation and gets OOM-killed."
+    }
   }
 }

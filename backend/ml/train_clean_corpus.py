@@ -43,7 +43,16 @@ from backend.processing.schema_maps import (
 )
 
 # â”€â”€ HDFS paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-HDFS_TRAIN      = 'hdfs://namenode:8020/threvia/corpus/train'
+# CORPUS_TRAIN lets a candidate corpus (e.g. the de-noised, source-diversified
+# corpus/train_v3 built by build_corpus_v3.py) be trained on and compared
+# against the live one without overwriting anything.
+HDFS_TRAIN      = os.getenv('CORPUS_TRAIN', 'hdfs://namenode:8020/threvia/corpus/train')
+# EXTRA_CORPUS is a comma-separated list of parquet paths unioned onto the
+# training frame.  build_corpus_v3.py uses it to append the previously unused
+# CIC-2017 attack captures (corpus/cic17_extra) and so give a second source to
+# the seven classes the corpus otherwise knows only from LycoS.  The extras are
+# already cleaned + scaled on the same saved scaler pipeline.
+EXTRA_CORPUS    = [p for p in os.getenv('EXTRA_CORPUS', '').split(',') if p.strip()]
 HDFS_PS_TEST    = 'hdfs://namenode:8020/threvia/corpus/portscan_test'
 HDFS_VALIDATION = 'hdfs://namenode:8020/threvia/validation/ids2025_validation.csv'
 HDFS_RAW        = 'hdfs://namenode:8020/threvia/raw'
@@ -169,6 +178,17 @@ def clean_and_scale_external(spark, df, feat_cols, pipe_model, label_udf, fill_m
     """Apply feature cleaning + log1p + the TRAIN-fitted scaler to an external test set.
     Must mirror the clean_features() + log1p logic in merge_corpus.py exactly.
     """
+    # CIC-2017 CSV-derived splits carry the duplicate header column as
+    # 'Fwd Header Length34' (position 34) plus a stray 'Fwd Header Length55'.
+    # The scaler expects the canonical name; leaving it unrenamed silently
+    # nulls the feature (and then median-imputes it), which measurably distorts
+    # the score distribution -- this is the root cause of the 12.87% vs 18.24%
+    # C2 FPR discrepancy traced in FINAL_MODEL_EVALUATION.md.
+    if 'Fwd Header Length34' in df.columns and 'Fwd Header Length' not in df.columns:
+        df = df.withColumnRenamed('Fwd Header Length34', 'Fwd Header Length')
+    if 'Fwd Header Length55' in df.columns:
+        df = df.drop('Fwd Header Length55')
+
     inf_val, ninf_val = float('inf'), float('-inf')
     for c in feat_cols:
         if c in df.columns:
@@ -186,14 +206,30 @@ def clean_and_scale_external(spark, df, feat_cols, pipe_model, label_udf, fill_m
 
     # Bug-2 fix: impute with training medians loaded from HDFS, NOT zero.
     # _train_medians is injected into this function via the `fill_map` param.
+    #
+    # PERF: the null test is done as ONE aggregation over all columns.  Asking
+    # ``df.filter(col(c).isNull()).count()`` per column launches a separate Spark
+    # job for each of the 78 features, and because `df` is un-cached that job
+    # re-executes the entire upstream plan (CSV parse + label UDF + log1p) every
+    # time — ~78 redundant scans per call, which is what made the evaluation
+    # scripts take tens of minutes.
     if fill_map:
-        null_cols = [c for c in feat_cols if c in fill_map
-                     and df.filter(F.col(c).isNull()).count() > 0]
-        if null_cols:
-            df = df.fillna({c: fill_map[c] for c in null_cols}, subset=null_cols)
+        present = [c for c in feat_cols if c in fill_map and c in df.columns]
+        if present:
+            null_counts = df.select([
+                F.sum(F.col(c).isNull().cast('int')).alias(c) for c in present
+            ]).first().asDict()
+            null_cols = [c for c in present if (null_counts.get(c) or 0) > 0]
+            if null_cols:
+                print(f'    imputing {len(null_cols)} column(s) with training medians')
+                df = df.fillna({c: fill_map[c] for c in null_cols}, subset=null_cols)
     else:
         # fallback: only if no medians saved (should not happen after merge_corpus fix)
-        null_cols = [c for c in feat_cols if df.filter(F.col(c).isNull()).count() > 0]
+        null_counts = df.select([
+            F.sum(F.col(c).isNull().cast('int')).alias(c) for c in feat_cols
+            if c in df.columns
+        ]).first().asDict()
+        null_cols = [c for c, n in null_counts.items() if (n or 0) > 0]
         if null_cols:
             df = df.fillna(0.0, subset=null_cols)
 
@@ -229,12 +265,15 @@ def main():
     spark.sparkContext.setLogLevel('WARN')
 
     # Label normalisation UDF
-    from backend.processing.schema_maps import LABEL_NORMALISE
-    norm_map = {k.upper(): v for k, v in LABEL_NORMALISE.items()}
+    from backend.processing.schema_maps import LABEL_NORMALISE, label_lookup_key
+    # label_lookup_key collapses non-ASCII characters to '-', which is what makes
+    # the (byte-corrupted) CIC-2017 Web-Attack labels resolvable.  See its
+    # docstring — without it those rows silently vanish.
+    norm_map = {label_lookup_key(k): v for k, v in LABEL_NORMALISE.items()}
     bc_map = spark.sparkContext.broadcast(norm_map)
     from pyspark.sql.types import StringType
     label_udf = F.udf(
-        lambda raw: bc_map.value.get(raw.strip().upper(), raw.strip())
+        lambda raw: bc_map.value.get(label_lookup_key(raw), raw.strip())
         if raw else None,
         StringType()
     )
@@ -244,6 +283,10 @@ def main():
     # â”€â”€ 1. Load training corpus â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     sep('1. Loading training corpus')
     train = spark.read.parquet(HDFS_TRAIN)
+    for _extra in EXTRA_CORPUS:
+        print(f'  Unioning extra corpus: {_extra}')
+        train = train.unionByName(spark.read.parquet(_extra),
+                                  allowMissingColumns=True)
     train_n = train.count()
     feat_cols = [c for c in CANONICAL_FEATURE_COLS if c != 'Label']
     print(f'  Training rows : {train_n:,}')
@@ -383,6 +426,19 @@ def main():
     rf_bin_model = rf_bin.fit(train)
     rf_bin_model.write().overwrite().save(f'{MODELS_OUT}/rf_binary')
     print(f'  Saved -> {MODELS_OUT}/rf_binary')
+
+    # Persist the StringIndexer's index -> label order next to the models that
+    # were fit with it.  The streaming detector loads this table, and the order
+    # is derived from label frequency, so it must travel with the model rather
+    # than be regenerated later from a corpus that may have changed.
+    from pyspark.sql.types import IntegerType, StructType, StructField
+    _lm_schema = StructType([
+        StructField('idx', IntegerType(), False),
+        StructField('label', StringType(), False),
+    ])
+    (spark.createDataFrame([(i, v) for i, v in enumerate(idx_model.labels)], _lm_schema)
+     .write.mode('overwrite').parquet(f'{MODELS_OUT}/label_index_map'))
+    print(f'  Saved -> {MODELS_OUT}/label_index_map ({len(idx_model.labels)} classes)')
 
     # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # B) MULTI-CLASS RANDOM FOREST
@@ -550,7 +606,9 @@ def main():
             },
             'per_class_recall': {'C1_session_split': c1_per_class},
         }
-        _out = os.path.join('/workspace', 'backend', 'ml', 'model_metrics.json')
+        _out = os.getenv(
+            'METRICS_OUT',
+            os.path.join('/workspace', 'backend', 'ml', 'model_metrics.json'))
         with open(_out, 'w', encoding='utf-8') as _fh:
             _json.dump(_metrics, _fh, indent=2, default=str)
         print(f'  Wrote {_out}')

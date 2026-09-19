@@ -26,9 +26,11 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 # Verify trained models exist on HDFS
 Write-Info "Checking trained models on HDFS..."
 try {
-    docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean/rf_binary 2>$null
+    # Gate model is versioned (models_clean_v3 promoted); scaler/medians and the
+    # Tier-2 Bot specialist stay in models_clean.
+    docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean_v3/rf_binary 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Success "Main RF model found on HDFS"
+        Write-Success "Gate model found on HDFS (models_clean_v3, promoted)"
     } else {
         Write-Host "
 WARNING: Trained models not found on HDFS." -ForegroundColor Red

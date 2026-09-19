@@ -395,25 +395,30 @@ function updateForensicPanel(threat) {
         drawerIp.textContent = threat.src_ip || threat.source_ip || 'Unknown IP';
     }
     
-    // Update danger index (based on confidence or default to high for attacks)
+    // Update danger index (based on confidence).  No hardcoded fallback: if a
+    // threat has no confidence field, show an explicit placeholder rather
+    // than an invented 75.0/50.0 that looks like a real score.
     const drawerDanger = document.getElementById('drawer-danger');
     if (drawerDanger) {
-        const dangerScore = threat.confidence 
-            ? (threat.confidence * 100).toFixed(1) 
-            : (threat.type === 'ml_alert' ? '75.0' : '50.0');
+        const dangerScore = (threat.confidence !== undefined && threat.confidence !== null)
+            ? (threat.confidence * 100).toFixed(1)
+            : '--';
         drawerDanger.textContent = `${dangerScore} / 100`;
     }
     
-    // Update PageRank (placeholder - would need graph data)
+    // Update PageRank.  Placeholder removed: a constant 0.084 presented as
+    // per-entity telemetry is indistinguishable from a real measurement.
     const drawerPagerank = document.getElementById('drawer-pagerank');
     if (drawerPagerank) {
-        drawerPagerank.textContent = '0.084'; // Placeholder
+        drawerPagerank.textContent = (threat.pagerank !== undefined && threat.pagerank !== null)
+            ? String(threat.pagerank)
+            : '-- (not indexed)';
     }
     
     // Update graph degree
     const drawerDegree = document.getElementById('drawer-degree');
     if (drawerDegree) {
-        const degree = threat.connection_count || '38 EDGES';
+        const degree = threat.connection_count || '--';
         drawerDegree.textContent = degree;
     }
     
@@ -515,4 +520,207 @@ function makeIncidentsClickable() {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     makeIncidentsClickable();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SPECTRAL WATERFALL MODULE
+// ══════════════════════════════════════════════════════════════════════════════
+
+let waterfallData = [];
+const waterfallConfig = {
+    cellWidth: 12,
+    cellHeight: 24,
+    gap: 2,
+    paddingLeft: 100,
+    paddingBottom: 40
+};
+
+async function updateSpectralWaterfall() {
+    const canvas = document.getElementById('waterfallCanvas');
+    if (!canvas) return;
+    
+    // Only fetch if visible to save resources
+    if (document.getElementById('spectral-section').style.display === 'none') {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/analytics/waterfall?minutes=60`);
+        const data = await response.json();
+        
+        if (data.waterfall) {
+            waterfallData = data.waterfall;
+            drawWaterfall();
+        }
+    } catch (error) {
+        console.error('Failed to update waterfall:', error);
+    }
+}
+
+function drawWaterfall() {
+    const container = document.getElementById('waterfall-grid');
+    const canvas = document.getElementById('waterfallCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+    }
+    
+    if (!waterfallData || waterfallData.length === 0) {
+        ctx.fillStyle = '#0c0f0e';
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#dac2ae';
+        ctx.font = '12px JetBrains Mono';
+        ctx.textAlign = 'center';
+        ctx.fillText('NO THREAT DENSITY DATA AVAILABLE', width/2, height/2);
+        return;
+    }
+
+    const attackTypes = [...new Set(waterfallData.map(d => d.attack_type))].sort();
+    const allTimestamps = [...new Set(waterfallData.map(d => d.timestamp))].sort();
+    const xBuckets = allTimestamps.length > 0 ? allTimestamps : [new Date().toISOString().substring(0, 16) + ':00'];
+    
+    const cw = waterfallConfig.cellWidth;
+    const ch = waterfallConfig.cellHeight;
+    const gap = waterfallConfig.gap;
+    const pl = waterfallConfig.paddingLeft;
+    const pb = waterfallConfig.paddingBottom;
+    
+    ctx.fillStyle = '#0c0f0e';
+    ctx.fillRect(0, 0, width, height);
+    
+    ctx.fillStyle = '#dac2ae';
+    ctx.font = '10px JetBrains Mono';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    
+    attackTypes.forEach((type, yIndex) => {
+        const y = yIndex * (ch + gap) + ch/2;
+        ctx.fillText(type, pl - 10, y);
+        ctx.strokeStyle = '#282b29';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pl, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+    });
+    
+    const matrix = {};
+    attackTypes.forEach(t => matrix[t] = {});
+    let maxCount = 1;
+    
+    waterfallData.forEach(d => {
+        matrix[d.attack_type][d.timestamp] = d;
+        if (d.count > maxCount) maxCount = d.count;
+    });
+    
+    const getColor = (count, max) => {
+        if (!count || count === 0) return '#1d201f';
+        const ratio = Math.min(count / Math.max(max, 5), 1.0);
+        if (ratio < 0.3) return `rgba(68, 244, 152, ${0.2 + ratio})`;
+        if (ratio < 0.7) return `rgba(255, 158, 27, ${0.4 + ratio})`;
+        return `rgba(255, 180, 171, ${0.6 + ratio})`;
+    };
+    
+    const maxCols = Math.floor((width - pl) / (cw + gap));
+    const startIdx = Math.max(0, xBuckets.length - maxCols);
+    const visibleBuckets = xBuckets.slice(startIdx);
+    
+    canvas.waterfallLayout = {
+        attackTypes,
+        visibleBuckets,
+        matrix,
+        cw, ch, gap, pl, pb,
+        rects: []
+    };
+
+    attackTypes.forEach((type, yIndex) => {
+        const y = yIndex * (ch + gap);
+        visibleBuckets.forEach((ts, xIndex) => {
+            const x = pl + xIndex * (cw + gap);
+            const cellData = matrix[type][ts];
+            const count = cellData ? cellData.count : 0;
+            ctx.fillStyle = getColor(count, maxCount);
+            ctx.fillRect(x, y, cw, ch);
+            canvas.waterfallLayout.rects.push({
+                x, y, w: cw, h: ch,
+                data: cellData || { attack_type: type, timestamp: ts, count: 0, connections: 0 }
+            });
+        });
+    });
+    
+    ctx.fillStyle = '#dac2ae';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const labelStep = Math.max(1, Math.floor(visibleBuckets.length / 8));
+    
+    visibleBuckets.forEach((ts, xIndex) => {
+        if (xIndex % labelStep === 0 || xIndex === visibleBuckets.length - 1) {
+            const x = pl + xIndex * (cw + gap) + cw/2;
+            const y = attackTypes.length * (ch + gap) + 5;
+            const timeStr = ts.substring(11, 16);
+            ctx.fillText(timeStr, x, y);
+            ctx.strokeStyle = '#544434';
+            ctx.beginPath();
+            ctx.moveTo(x, y - 5);
+            ctx.lineTo(x, y - 2);
+            ctx.stroke();
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const canvas = document.getElementById('waterfallCanvas');
+    const tooltip = document.getElementById('waterfall-tooltip');
+    
+    if (canvas && tooltip) {
+        canvas.addEventListener('mousemove', (e) => {
+            if (!canvas.waterfallLayout) return;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            
+            let hit = null;
+            for (const r of canvas.waterfallLayout.rects) {
+                if (mouseX >= r.x && mouseX <= r.x + r.w &&
+                    mouseY >= r.y && mouseY <= r.y + r.h) {
+                    hit = r.data;
+                    break;
+                }
+            }
+            
+            if (hit && hit.count > 0) {
+                document.getElementById('wf-tt-type').textContent = hit.attack_type;
+                document.getElementById('wf-tt-time').textContent = hit.timestamp.substring(11, 19) + ' UTC';
+                document.getElementById('wf-tt-count').textContent = `${hit.count} ALERTS`;
+                document.getElementById('wf-tt-conn').textContent = `${hit.connections} TOTAL CONNECTIONS`;
+                
+                tooltip.style.left = `${e.clientX + 15}px`;
+                tooltip.style.top = `${e.clientY + 15}px`;
+                tooltip.style.display = 'flex';
+                canvas.style.cursor = 'crosshair';
+            } else {
+                tooltip.style.display = 'none';
+                canvas.style.cursor = 'default';
+            }
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.style.display = 'none';
+        });
+        
+        window.addEventListener('resize', () => {
+            if (document.getElementById('spectral-section').style.display !== 'none') {
+                drawWaterfall();
+            }
+        });
+    }
+    
+    // Hook into global refresh interval
+    setInterval(updateSpectralWaterfall, 5000);
+    updateSpectralWaterfall();
 });

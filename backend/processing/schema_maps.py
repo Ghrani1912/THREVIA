@@ -353,6 +353,41 @@ CIC18_EXTRA_DROP = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CIC-DDoS2019  →  Canonical
+# ─────────────────────────────────────────────────────────────────────────────
+# CIC-DDoS2019 ships as parquet with the same CICFlowMeter feature set as
+# CIC-2017/2018, just spelled differently (abbreviated segment/window column
+# names).  Unlike CTU-13 (Argus binetflow) and UNSW-NB15 (Bro/Argus), it maps
+# onto the canonical 78-feature schema one-to-one, so it is the only unused
+# dataset in backend/data that can actually be merged.
+#
+# Its own release split is day-based (CSV/parquet "-training" vs "-testing"),
+# which makes it a usable *cross-environment* holdout: 2019 captures, different
+# attack tooling, never present in the training corpus.
+DDOS19_RENAME: dict[str, str] = {
+    # ── forward / backward totals ─────────────────────────────────
+    "Fwd Packets Length Total":  "Total Length of Fwd Packets",
+    "Bwd Packets Length Total":  "Total Length of Bwd Packets",
+    "Packet Length Min":         "Min Packet Length",
+    "Packet Length Max":         "Max Packet Length",
+    "Avg Packet Size":           "Average Packet Size",
+
+    # ── TCP window / segment ──────────────────────────────────────
+    "Init Fwd Win Bytes":        "Init_Win_bytes_forward",
+    "Init Bwd Win Bytes":        "Init_Win_bytes_backward",
+    "Fwd Act Data Packets":      "act_data_pkt_fwd",
+    "Fwd Seg Size Min":          "min_seg_size_forward",
+
+    # ── label ─────────────────────────────────────────────────────
+    "Label":                     "Label",
+}
+
+# CIC-DDoS2019-only columns → DROP (no canonical equivalent)
+DDOS19_EXTRA_DROP = [
+    "Protocol",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # IDS2025  →  Canonical  (held-out validation set only)
 # ─────────────────────────────────────────────────────────────────────────────
 # IDS2025 is nearly identical to CIC-2017 with minor naming differences:
@@ -439,15 +474,58 @@ LABEL_NORMALISE: dict[str, str] = {
     # ── PortScan ──────────────────────────────────────────────────
     "PORTSCAN":                         "PortScan",
 
+    # ── CIC-DDoS2019 reflection/multi-vector floods ─────────────────
+    # CIC-DDoS2019 labels every attack family separately (Syn, UDP, UDPLag,
+    # TFTP, MSSQL, LDAP, NetBIOS, Portmap, SNMP, DNS, plus the "DrDoS_" capture
+    # of the same families).  All of them are volumetric/reflection DDoS, so
+    # they fold into the existing "DDoS" class rather than adding 20 new
+    # single-source classes.  Portmap is portmapper/mountd amplification, NOT
+    # port scanning — do not map it to PortScan.
+    "SYN":                              "DDoS",
+    "UDP":                              "DDoS",
+    "UDP-LAG":                          "DDoS",
+    "UDPLAG":                           "DDoS",
+    "TFTP":                             "DDoS",
+    "MSSQL":                            "DDoS",
+    "LDAP":                             "DDoS",
+    "NETBIOS":                          "DDoS",
+    "PORTMAP":                          "DDoS",
+    "SNMP":                             "DDoS",
+    "DNS":                              "DDoS",
+    "WEBDDOS":                          "DDoS",
+    "DRDOS_DNS":                        "DDoS",
+    "DRDOS_LDAP":                       "DDoS",
+    "DRDOS_MSSQL":                      "DDoS",
+    "DRDOS_NTP":                        "DDoS",
+    "DRDOS_NETBIOS":                    "DDoS",
+    "DRDOS_SNMP":                       "DDoS",
+    "DRDOS_UDP":                        "DDoS",
+
     # ── Heartbleed ────────────────────────────────────────────────
     "HEARTBLEED":                       "Heartbleed",
 }
 
 
+def label_lookup_key(raw: str) -> str:
+    """Build the LABEL_NORMALISE key for a raw label string.
+
+    Any non-ASCII character is collapsed to '-'.
+
+    This is not cosmetic.  The distributed CIC-IDS2017 Thursday Web-Attack CSV
+    carries a corrupted label field: the en-dash separating "Web Attack" from
+    the attack name was destroyed by an earlier spreadsheet round-trip and is
+    now the literal UTF-8 replacement character U+FFFD (bytes EF BF BD).  No
+    encoding choice recovers it -- decoding as Latin-1 only turns one bad
+    character into three -- so the maps' 'WEB ATTACK \\x96 ...' entries can never
+    match.  Treating every non-ASCII character as the same separator makes those
+    labels land on the ASCII 'WEB ATTACK - ...' keys instead of being dropped.
+    """
+    return ''.join('-' if ord(c) > 126 else c for c in raw.strip()).upper()
+
+
 def normalise_label(raw: str) -> str:
     """Return canonical label for a raw label string. Falls back to raw.strip()."""
-    key = raw.strip().upper()
-    return LABEL_NORMALISE.get(key, raw.strip())
+    return LABEL_NORMALISE.get(label_lookup_key(raw), raw.strip())
 
 
 # ─────────────────────────────────────────────────────────────────────────────

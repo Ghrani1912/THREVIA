@@ -109,6 +109,15 @@ logger = logging.getLogger(__name__)
 # bot_route_max_conf: OFF by default (None = always route).  Gating the Bot
 #                     specialist on "binary RF unsure" costs 857 of 905 true Bot
 #                     detections, because Bot flows are flagged confidently.
+# suppress_infiltration: ON by default — a deliberate mitigation, not a tuning
+#                     choice.  On the streamed corpus, 980 of 986 flows the
+#                     multiclass RF labelled "Infiltration" were truly BENIGN:
+#                     that label alone accounts for 76% of all remaining false
+#                     positives.  The independent held-out evaluation agrees
+#                     (7.44% of BENIGN rows receive the Infiltration label).
+#                     Suppressed flows are NOT discarded: they are routed to a
+#                     manual-review bucket instead of auto-flagging.  Bot-routed
+#                     flows keep their Bot verdict regardless.
 DEFAULTS: dict[str, Any] = {
     "attack_threshold": 0.65,
     "bot_threshold": 0.50,
@@ -119,6 +128,7 @@ DEFAULTS: dict[str, Any] = {
     "severity_critical": 0.85,
     "severity_high": 0.65,
     "severity_medium": 0.40,
+    "suppress_infiltration": True,
 }
 
 # Environment overrides (name → Thresholds field).  ``ML_THRESHOLD`` is kept
@@ -132,6 +142,7 @@ _ENV_MAP = {
     "SEVERITY_CRITICAL": "severity_critical",
     "SEVERITY_HIGH": "severity_high",
     "SEVERITY_MEDIUM": "severity_medium",
+    "SUPPRESS_INFILTRATION": "suppress_infiltration",
 }
 
 DEFAULT_THRESHOLDS_PATH = Path(__file__).with_name("thresholds.json")
@@ -208,6 +219,7 @@ class Thresholds:
     severity_critical: float = DEFAULTS["severity_critical"]
     severity_high: float = DEFAULTS["severity_high"]
     severity_medium: float = DEFAULTS["severity_medium"]
+    suppress_infiltration: bool = DEFAULTS["suppress_infiltration"]
     source: str = "defaults"
 
     def effective_bot_logit_shift(self) -> float:
@@ -405,13 +417,24 @@ def classify_flow(
     else:
         attack_type = "Attack (unclassified)"
 
-    return {
+    verdict = {
         "attack_type": attack_type,
         "severity": severity_for(p_attack, th),
         "confidence": p_attack,
         "p_bot_calibrated": p_bot_cal,
         "bot_routed": bool(bot_routed),
+        "auto_alert": True,
     }
+
+    # Infiltration suppression (see DEFAULTS note): the multiclass label is
+    # wrong far more often than right on benign traffic.  Route to manual
+    # review instead of auto-flagging.  If the Bot specialist had accepted the
+    # flow, attack_type would already be "Bot", so no extra check is needed.
+    if th.suppress_infiltration and attack_type == "Infiltration":
+        verdict["auto_alert"] = False
+        verdict["review_reason"] = "infiltration_label_suppressed"
+
+    return verdict
 
 
 def should_alert(p_attack: float, thresholds: Thresholds | None = None) -> bool:

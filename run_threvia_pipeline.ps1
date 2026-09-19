@@ -139,6 +139,7 @@ if (3 -in $Phases) {
     if ($LASTEXITCODE -eq 0) {
         Write-Success "Phase 3b complete: Bot specialist classifier saved to HDFS"
         Write-Info "  Model: /threvia/models_clean/rf_bot_binary (100 trees, depth 12)"
+        Write-Info "  Tier-2 is shared by every gate version - it is not retrained per gate."
     } else {
         Write-Warning "Phase 3b: Bot classifier failed (non-blocking — main RF still valid)"
     }
@@ -267,9 +268,13 @@ if (7 -in $Phases) {
     
     Write-Info "Running end-to-end validation..."
     
+    # The gate model is versioned (models_clean_v3 is promoted); the scaler,
+    # imputer medians and Tier-2 Bot specialist stay in models_clean.  See
+    # backend/ml/eval_bot_behind_gate.py for the promotion evidence.
     $checks = @{
         "HDFS corpus" = "docker exec threvia-namenode hdfs dfs -test -e /threvia/corpus/train"
-        "Main RF model"   = "docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean/rf_binary"
+        "Gate RF model"   = "docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean_v3/rf_binary"
+        "Scaler/medians"  = "docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean/scaler_pipeline"
         "Bot classifier"  = "docker exec threvia-namenode hdfs dfs -test -e /threvia/models_clean/rf_bot_binary"
         "Bloom filter" = "Test-Path backend/realtime/bloom_filter.pkl"
         "Graph export" = "Test-Path backend/graph/graph_export.html"

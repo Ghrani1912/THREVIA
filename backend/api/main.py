@@ -1,4 +1,4 @@
-﻿"""
+"""
 THREVIA API Server
 FastAPI backend to serve real-time threat data to the SOC dashboard
 """
@@ -11,6 +11,7 @@ from pymongo import MongoClient, DESCENDING
 from typing import List, Dict, Any
 import asyncio
 import os
+import json
 from datetime import datetime, timezone
 import sys
 
@@ -159,8 +160,22 @@ async def get_summary_metrics():
         # Count spike alerts by severity
         critical_spikes = fresh_db.stream_alerts.count_documents({"severity": "Critical"})
         
-        # Detection rate from Phase 3 evaluation
-        detection_rate = 74.8  # (Bot 65.26% + Infiltration 68.97% + BENIGN 90.04%) / 3
+        # Detection rate: read from the measured metrics artifact, same
+        # discipline as /api/v1/model/performance.  The old hardcoded 74.8
+        # blended the Bot 65.26% / Infiltration 68.97% figures, both of which
+        # were later shown to be measured on in-sample or 29/36-row supports.
+        # An explicit unknown beats a stale constant.
+        detection_rate: float | None = None
+        detection_rate_source = "unavailable"
+        try:
+            with open(MODEL_METRICS_PATH, encoding="utf-8") as _mf:
+                _mm = json.load(_mf)
+            _dr = _mm.get("pipeline", {}).get("detection_rate")
+            if _dr is not None:
+                detection_rate = float(_dr)
+                detection_rate_source = "measured"
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
         
         # Active threats (last 5 minutes)
         from datetime import timedelta
@@ -182,6 +197,7 @@ async def get_summary_metrics():
             "high_alerts": high_alerts,
             "active_threats": active_threats,
             "detection_rate": detection_rate,
+            "detection_rate_source": detection_rate_source,
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
@@ -397,10 +413,48 @@ async def get_timeline_data(hours: int = 24):
     except Exception as e:
         return {"error": str(e)}
 
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.get("/api/v1/analytics/waterfall")
+async def get_waterfall_data(minutes: int = 60):
+    """Get spectral waterfall data (stream alerts over time)"""
+    try:
+        from datetime import timedelta
+        start_time = datetime.utcnow() - timedelta(minutes=minutes)
+        
+        pipeline = [
+            {"$match": {"created_at": {"$gte": start_time}}},
+            {"$group": {
+                "_id": {
+                    "minute": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:00", "date": "$created_at"}},
+                    "attack_type": "$attack_label"
+                },
+                "count": {"$sum": 1},
+                "connections": {"$sum": "$connection_count"}
+            }},
+            {"$sort": {"_id.minute": 1}}
+        ]
+        
+        result = list(db.stream_alerts.aggregate(pipeline))
+        
+        return {
+            "waterfall": [
+                {
+                    "timestamp": r["_id"]["minute"],
+                    "attack_type": r["_id"]["attack_type"] or "Unknown",
+                    "count": r["count"],
+                    "connections": r["connections"]
+                }
+                for r in result
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 # Model performance is a *measured* artifact, not a constant.  The endpoint used
 # to return hardcoded numbers, several of which came from a known-broken
-# evaluation path (the 18.24% C2 FPR was corrected to 12.87% once the scaler
-# column-rename bug was fixed), so the dashboard could disagree with the models
+# evaluation path (the 18.24% C2 FPR figure was itself later traced to a
+# missing Fwd-Header-Length rename in the evaluation scripts -- the documented
+# 12.87% was the faithful one), so the dashboard could disagree with the models
 # actually deployed.  ``backend/ml/train_clean_corpus.py`` now emits this file on
 # every retrain; see documentation/FINAL_MODEL_EVALUATION.md.
 MODEL_METRICS_PATH = os.getenv(
@@ -524,10 +578,6 @@ async def serve_dashboard():
         return FileResponse(dashboard_file)
     return {"error": "Dashboard not found"}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
 
 
 
@@ -635,7 +685,6 @@ async def get_graph_view(scope: str = "threat", k: int = 3, max_nodes: int = 0):
     except Exception as e:
         return {"error": str(e), "nodes": [], "edges": [], "communities": [], "metadata": {}}
 
-
 @app.get("/api/v1/graph/ego/{ip_address}")
 async def get_graph_ego(ip_address: str, limit: int = 200):
     """
@@ -649,3 +698,8 @@ async def get_graph_ego(ip_address: str, limit: int = 200):
         return load_ego(ip_address, db, limit=limit)
     except Exception as e:
         return {"error": str(e), "nodes": [], "edges": [], "communities": [], "metadata": {}}
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=8000)
+

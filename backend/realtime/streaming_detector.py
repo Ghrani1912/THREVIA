@@ -53,6 +53,11 @@ Environment variables:
     STREAM_HOST              simulator host (default localhost)
     STREAM_PORT              simulator port (default 9999)
     SPARK_MASTER             spark master URL (default local[*])
+    THREVIA_MODELS_DIR       gate model dir (default models_clean_v3; set to
+                             .../models_clean to roll back to the v1 gate)
+    THREVIA_SHARED_DIR       scaler + imputer medians + rf_bot_binary dir
+                             (default models_clean; shared by every gate)
+    THREVIA_BOT_MODEL        explicit path to the Tier-2 Bot specialist
     SPIKE_THRESHOLD          min connections/window for alert (default 50)
     WINDOW_SECONDS           tumbling window size in seconds (default 60)
     MONGO_URI                MongoDB connection string
@@ -75,6 +80,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -121,11 +127,29 @@ MAX_FILES_PER_TRIGGER = int(os.getenv("MAX_FILES_PER_TRIGGER", "4"))
 # and ~130 rejected flows/trigger, that's ~3 docs/s of baseline traffic.
 NOMINAL_SAMPLE_RATE = float(os.getenv("NOMINAL_SAMPLE_RATE", "0.02"))
 
-# Model paths
-MODELS_BASE = "hdfs://namenode:8020/threvia/models_clean"
-SCALER_PATH = f"{MODELS_BASE}/scaler_pipeline"
+# Model paths.
+#
+# The gate model (the binary RF the alert decision is made on, plus the
+# multiclass head that only describes it) is versioned: models_clean_v3 won the
+# matched-FPR comparison in backend/ml/eval_bot_behind_gate.py, so it is the
+# default here.  The scaler, imputer medians and Bot specialist are NOT
+# versioned — every retrain reuses the ones in models_clean — so they resolve
+# against SHARED_DIR and keep working when the gate is rolled back.
+#
+# ALERT THRESHOLD TRAVELS WITH THE GATE MODEL.  v3's scores sit much lower than
+# v1's: at the v1 operating cut of T=0.65 v3 flags 0.16% of the clean BENIGN
+# holdout (v1: 3.65%) and passes exactly 0 of 570 held-out Bot flows to the
+# Tier-2 specialist.  Always pair a gate with the cut derived for it by
+# backend/ml/calibrate_thresholds.py (-> backend/realtime/thresholds.json).
+_SHARED_DEFAULT = "hdfs://namenode:8020/threvia/models_clean"
+MODELS_BASE = os.getenv(
+    "THREVIA_MODELS_DIR",
+    os.getenv("GATE_MODELS_DIR", "hdfs://namenode:8020/threvia/models_clean_v3"),
+)
+SHARED_DIR = os.getenv("THREVIA_SHARED_DIR", _SHARED_DEFAULT)
+SCALER_PATH = f"{SHARED_DIR}/scaler_pipeline"
 RF_BINARY_PATH = f"{MODELS_BASE}/rf_binary"
-RF_BOT_PATH = f"{MODELS_BASE}/rf_bot_binary"
+RF_BOT_PATH = os.getenv("THREVIA_BOT_MODEL", f"{SHARED_DIR}/rf_bot_binary")
 # Optional: used only to *describe* an attack, never to decide that it is one.
 RF_MULTI_PATH = f"{MODELS_BASE}/rf_multiclass"
 LABEL_MAP_PATH = f"{MODELS_BASE}/label_index_map"
@@ -368,6 +392,11 @@ def _ml_batch_handler(
                     "p_bot":             rec.get("p_bot"),
                     "p_bot_calibrated":  verdict["p_bot_calibrated"],
                     "bot_routed":        verdict["bot_routed"],
+                    # Deliberate mitigation (Step 6): the multiclass RF's
+                    # "Infiltration" label was false 980/986 times on the
+                    # streamed corpus (76% of all remaining FPs).  Such flows
+                    # go to the manual-review collection, not the alert feed.
+                    "auto_alert":        verdict["auto_alert"],
                     # Simulator answer key, retained for the CSV export only.
                     # Never used to label the alert.
                     "ground_truth_label": rec.get("gt_label"),
@@ -376,12 +405,23 @@ def _ml_batch_handler(
                 })
 
             if alerts:
-                written = writer.write_ml_alerts_bulk(alerts)
-                logger.info(
-                    "Batch %d: %d ML alerts from %d above-threshold flows (%s)",
-                    batch_id, written, attack_count,
-                    ", ".join(sorted({a["attack_type"] for a in alerts})),
-                )
+                auto, review = [], []
+                for a in alerts:
+                    (auto if a.get("auto_alert", True) else review).append(a)
+                if auto:
+                    written = writer.write_ml_alerts_bulk(auto)
+                    logger.info(
+                        "Batch %d: %d ML alerts from %d above-threshold flows (%s)",
+                        batch_id, written, len(auto),
+                        ", ".join(sorted({a["attack_type"] for a in auto})),
+                    )
+                if review:
+                    rv = writer.write_manual_review_bulk(review)
+                    logger.info(
+                        "Batch %d: %d flows routed to manual review (%s)",
+                        batch_id, rv,
+                        ", ".join(sorted({a["attack_type"] for a in review})),
+                    )
 
         except Exception as e:
             logger.error("Batch %d ML handler error: %s", batch_id, e, exc_info=True)
@@ -451,7 +491,9 @@ def run_streaming_detector() -> None:
     spark.sparkContext.setLogLevel("WARN")
 
     # ── 4. Load ML models (requires active Spark session) ────────────────────
-    logger.info("Loading ML models from HDFS …")
+    logger.info("Loading gate model from %s (shared artifacts: %s) …",
+                MODELS_BASE, SHARED_DIR)
+    logger.info("Tier-2 Bot specialist: %s", RF_BOT_PATH)
     scaler = PipelineModel.load(SCALER_PATH)
     rf_binary = RandomForestClassificationModel.load(RF_BINARY_PATH)
     rf_bot = RandomForestClassificationModel.load(RF_BOT_PATH)
@@ -459,10 +501,27 @@ def run_streaming_detector() -> None:
     # ── 5. Resolve the decision policy (must happen before any scoring) ──────
     thresholds = load_thresholds()
     logger.info("%s", thresholds.describe())
-    if thresholds.attack_threshold < 0.50:
+    # The built-in cuts are on the v1 score scale.  A versioned gate is not, so
+    # running one against the defaults is exactly the mistake that produced the
+    # old 0.25 operating point — except now it fails silently in the other
+    # direction: v3 at the v1 cut of 0.65 flags 0.16% of the clean BENIGN
+    # holdout and passes 0 of 570 held-out Bot flows to the Tier-2 specialist.
+    # Warn unless the cut came from a calibration artifact or was set explicitly.
+    _file_source = thresholds.source.split("+env(")[0]
+    _from_artifact = (
+        _file_source not in ("defaults", "caller")
+        and Path(_file_source).is_file()
+    )
+    if (not _from_artifact
+            and "+env(" not in thresholds.source
+            and Path(MODELS_BASE).name != Path(SHARED_DIR).name):
         logger.warning(
-            "attack_threshold=%.2f is below the untuned 0.50 baseline — expect a "
-            "high false-positive rate", thresholds.attack_threshold,
+            "No calibrated threshold artifact resolved (source=%s) and the gate "
+            "(%s) is not the model the built-in cuts were measured on (%s). "
+            "The score scales differ, so this pair is not an operating point "
+            "anyone chose. Run backend/ml/calibrate_thresholds.py with "
+            "MODELS_DIR=%s first.",
+            thresholds.source, MODELS_BASE, SHARED_DIR, MODELS_BASE,
         )
 
     rf_multi = _try_load_multiclass(spark)

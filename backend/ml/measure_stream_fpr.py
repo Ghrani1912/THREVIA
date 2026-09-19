@@ -23,6 +23,7 @@ Usage (inside the Spark container)::
 
 from __future__ import annotations
 
+import os
 import sys
 
 sys.path.insert(0, "/workspace")
@@ -35,14 +36,25 @@ from pyspark.ml.functions import vector_to_array
 
 HDFS = "hdfs://namenode:8020/threvia"
 DATASET = f"{HDFS}/corpus/demo_balanced_150k_fixed"   # what the simulator loads
-SCALER = f"{HDFS}/models_clean/scaler_pipeline"
-RF_BIN = f"{HDFS}/models_clean/rf_binary"
-RF_BOT = f"{HDFS}/models_clean/rf_bot_binary"
+# The gate model is versioned; the scaler and Bot specialist are shared by every
+# gate.  Same env names the detector uses, so this replays the deployed pipeline.
+SHARED_DIR = os.getenv("THREVIA_SHARED_DIR", f"{HDFS}/models_clean")
+GATE_DIR = os.getenv("THREVIA_MODELS_DIR", f"{HDFS}/models_clean_v3")
+SCALER = f"{SHARED_DIR}/scaler_pipeline"
+RF_BIN = f"{GATE_DIR}/rf_binary"
+RF_BOT = os.getenv("THREVIA_BOT_MODEL", f"{SHARED_DIR}/rf_bot_binary")
 
-# Old hardcoded runtime value (the launch command's `export ML_THRESHOLD=0.25`)
-# versus the evaluated value from threshold_test.py and the new policy default.
+# Old hardcoded runtime value (the launch command's `export ML_THRESHOLD=0.25`).
 OLD_THRESHOLD = 0.25
-NEW_THRESHOLD = 0.65
+# The cut the pipeline actually runs is resolved from the policy (thresholds.json
+# when present).  Hardcoding it here is how this document drifted away from the
+# deployment once already: the deployed value is a property of the gate model's
+# score scale, not a constant.
+from backend.realtime.detection_policy import load_thresholds  # noqa: E402
+_POLICY = load_thresholds()
+NEW_THRESHOLD = round(float(_POLICY.attack_threshold), 4)
+# Kept as a labelled reference point for continuity with the 3.26%-at-0.65 table.
+REFERENCE_THRESHOLD = 0.65
 
 GT_COL = "is_attack"
 LABEL_COL = "Label"
@@ -83,6 +95,9 @@ def main() -> int:
     spark.sparkContext.setLogLevel("WARN")
 
     sep("Loading the streamed dataset and models")
+    print(f"  Gate model      : {RF_BIN}")
+    print(f"  Shared artifacts: {SHARED_DIR}")
+    print(f"  Policy          : {_POLICY.describe()}")
     raw = spark.read.parquet(DATASET)
     print(f"  Dataset columns : {len(raw.columns)}")
 
@@ -144,7 +159,8 @@ def main() -> int:
             "precision_pct": tp / alerts * 100.0 if alerts else 0.0,
         }
 
-    grid = [0.25, 0.40, 0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
+    grid = sorted(set([0.25, 0.40, 0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
+                      + [NEW_THRESHOLD, REFERENCE_THRESHOLD]))
     hdr = (f"  {'T':>6} | {'ALERTS':>10} | {'FP FLOWS':>10} | {'FPR%':>8} | "
            f"{'RECALL%':>8} | {'PRECISION%':>10}")
     print(hdr)
@@ -157,7 +173,9 @@ def main() -> int:
         if abs(t - OLD_THRESHOLD) < 1e-9:
             flag = "  <-- OLD runtime (your TERM 2 command)"
         if abs(t - NEW_THRESHOLD) < 1e-9:
-            flag = "  <-- NEW policy default"
+            flag = "  <-- DEPLOYED (resolved policy, threshold artifact)"
+        if abs(t - REFERENCE_THRESHOLD) < 1e-9 and abs(t - NEW_THRESHOLD) > 1e-9:
+            flag = "  <-- previous v1 operating point (reference)"
         print(f"  {t:>6.2f} | {s['alerts']:>10,} | {s['fp']:>10,} | "
               f"{s['fpr_pct']:>7.2f}% | {s['recall_pct']:>7.2f}% | "
               f"{s['precision_pct']:>9.2f}%{flag}")
@@ -165,7 +183,7 @@ def main() -> int:
     old = next(r for r in rows if abs(r["t"] - OLD_THRESHOLD) < 1e-9)
     new = next(r for r in rows if abs(r["t"] - NEW_THRESHOLD) < 1e-9)
 
-    sep("Effect of moving the operating point 0.25 -> 0.65")
+    sep(f"Effect of moving the operating point {OLD_THRESHOLD} -> {NEW_THRESHOLD:.4f}")
     fp_cut = old["fp"] - new["fp"]
     alert_cut = old["alerts"] - new["alerts"]
     print(f"  FPR            : {old['fpr_pct']:.2f}%  ->  {new['fpr_pct']:.2f}%"
@@ -192,8 +210,15 @@ def main() -> int:
         .cache()
     )
 
-    th = Thresholds()          # new policy defaults
+    th = Thresholds()          # built-in policy (the gating experiments' baseline)
+    th.attack_threshold = NEW_THRESHOLD
     gate = th.bot_route_max_confidence
+    if gate is None:
+        # Gating was measured harmful and is off by default (see
+        # detection_policy.py): Bot flows are flagged confidently, so a
+        # "binary RF unsure" rule discards most of them. Report the ungated
+        # rule only rather than inventing a band.
+        gate = 1.0
 
     # OLD: unconditional, hard prediction (p_bot >= 0.5), checked first.
     old_bot_all = bot_scored.filter(F.col("p_attack") >= OLD_THRESHOLD)

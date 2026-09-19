@@ -47,10 +47,18 @@ _ENV_KEYS = [
 
 @contextlib.contextmanager
 def clean_env(**overrides: str):
-    """Run a block with the policy env vars cleared, then restored."""
+    """Run a block with the policy env vars cleared, then restored.
+
+    ``THREVIA_THRESHOLDS`` is additionally pointed at a path that does not
+    exist, so these tests measure the *built-in* policy and stay independent of
+    whatever ``backend/realtime/thresholds.json`` the checkout happens to carry
+    (that artifact is now a promoted v3 operating point, and its numbers are
+    deliberately not the built-in defaults).
+    """
     saved = {k: os.environ.get(k) for k in _ENV_KEYS}
     for k in _ENV_KEYS:
         os.environ.pop(k, None)
+    os.environ["THREVIA_THRESHOLDS"] = "/nonexistent/thresholds.json"
     os.environ.update(overrides)
     try:
         yield
@@ -194,17 +202,55 @@ def test_bot_route_gating_accepts_none_as_explicitly_off():
 
 
 def test_below_threshold_produces_no_alert():
-    assert should_alert(0.30) is False
-    assert classify_flow(0.30, 0.99) is None
-    assert classify_flow(0.6499, 0.99) is None  # just under the tuned cut
+    # Explicit built-in policy: should_alert/classify_flow with no argument
+    # resolve the *shipped* thresholds.json, which is a different operating
+    # point by design.  These assertions are about the decision logic itself.
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert should_alert(0.30, th) is False
+    assert classify_flow(0.30, 0.99, th) is None
+    assert classify_flow(0.6499, 0.99, th) is None  # just under the tuned cut
 
 
 def test_threshold_is_inclusive_and_malformed_scores_are_dropped():
-    assert should_alert(0.65) is True
-    assert classify_flow(0.65, None)["severity"] == "High"
-    assert classify_flow(None) is None
-    assert classify_flow("not-a-number") is None
-    assert classify_flow(float("nan")) is None
+    with clean_env():
+        th = load_thresholds(path=Path("/nonexistent.json"))
+    assert should_alert(0.65, th) is True
+    assert classify_flow(0.65, None, th)["severity"] == "High"
+    assert classify_flow(None, None, th) is None
+    assert classify_flow("not-a-number", None, th) is None
+    assert classify_flow(float("nan"), None, th) is None
+
+
+def test_shipped_threshold_artifact_names_the_gate_it_was_derived_for():
+    """A gate model and its cut are not interchangeable across retrains.
+
+    v3 at the v1 cut of 0.65 flags 0.16% of the clean BENIGN holdout and detects
+    0 of 570 held-out Bot flows; v1 at v3's calibrated cut would flood.  The
+    committed artifact records which gate it came from, and this test keeps a
+    promoted gate and its operating point from silently drifting apart.
+    (Numbers from backend/ml/eval_bot_behind_gate.py.)
+    """
+    artifact = Path(__file__).with_name("thresholds.json")
+    if not artifact.is_file():
+        return  # no calibration has been run in this checkout
+
+    cfg = json.loads(artifact.read_text(encoding="utf-8-sig"))
+    assert "gate_models_dir" in cfg, "artifact must record its gate model"
+    assert Path(cfg["gate_models_dir"]).name.startswith("models_clean")
+    assert Path(cfg["shared_models_dir"]).name.startswith("models_clean")
+
+    th = cfg["thresholds"]
+    assert 0.0 < th["attack_threshold"] < 1.0
+    assert 0.0 < cfg["measured_fpr_pct"] < 10.0, cfg["measured_fpr_pct"]
+    # The severity ladder is read off the same score, so it has to stay ordered
+    # above the alert cut.  A rescaled gate whose ladder was not re-derived
+    # leaves Critical/High permanently empty on the dashboard.
+    assert th["attack_threshold"] <= th["severity_high"] <= th["severity_critical"]
+    with clean_env():
+        resolved = load_thresholds(path=artifact)
+    assert abs(resolved.attack_threshold - th["attack_threshold"]) < 1e-9
+    assert abs(resolved.severity_critical - th["severity_critical"]) < 1e-9
 
 
 def test_bot_defaults_are_the_measured_optimum_not_the_intuitive_fix():
@@ -279,6 +325,45 @@ def test_prior_correction_is_opt_in_and_would_silence_the_bot_model():
     assert classify_flow(0.70, 0.95, corrected)["attack_type"] != "Bot"
     # ...while the shipped default accepts the very same score.
     assert classify_flow(0.70, 0.95, Thresholds())["attack_type"] == "Bot"
+
+
+def test_infiltration_label_is_suppressed_to_manual_review_by_default():
+    """Step 6 mitigation: 980/986 Infiltration labels were false on the streamed
+    corpus (76% of all remaining FPs).  Default policy routes them to manual
+    review instead of auto-flagging."""
+    out = classify_flow(0.70, None, Thresholds(), attack_type_hint="Infiltration")
+    assert out["attack_type"] == "Infiltration"
+    assert out["auto_alert"] is False
+    assert out["review_reason"] == "infiltration_label_suppressed"
+    # Suppression must not change the confidence/severity that a reviewer sees.
+    assert out["confidence"] == 0.70
+    assert out["severity"] == "High"
+
+
+def test_bot_accepted_verdicts_are_not_suppressed():
+    """A confident Bot verdict outranks the descriptive multiclass label, so it
+    is a real Bot detection and must keep auto-alerting.  (The specialist is
+    consulted for every flagged flow; when it accepts, attack_type is Bot and
+    the suppression never sees an Infiltration label.)"""
+    th = Thresholds()
+    out = classify_flow(0.70, 0.99, th, attack_type_hint="Infiltration")
+    assert out["attack_type"] == "Bot"
+    assert out["auto_alert"] is True
+
+
+def test_infiltration_suppression_is_opt_out():
+    """The suppression is a deliberate policy; operators can disable it via env
+    (SUPPRESS_INFILTRATION=false) if their traffic mix differs."""
+    th = load_thresholds(overrides={"suppress_infiltration": False})
+    out = classify_flow(0.70, None, th, attack_type_hint="Infiltration")
+    assert out["auto_alert"] is True
+
+
+def test_other_labels_are_never_suppressed():
+    th = Thresholds()
+    for hint in ("DDoS", "Bot", "PortScan", "Attack (unclassified)"):
+        out = classify_flow(0.70, None, th, attack_type_hint=hint)
+        assert out["auto_alert"] is True, hint
 
 
 def test_multiclass_hint_describes_but_never_labels_benign_as_an_alert():
