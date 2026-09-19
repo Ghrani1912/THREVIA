@@ -523,17 +523,127 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SPECTRAL WATERFALL MODULE
+// SPECTRAL TELEMETRY — MULTI-VECTOR OVERLAY + TEMPORAL CORRELATION INSPECTION
 // ══════════════════════════════════════════════════════════════════════════════
+//
+// Three layers, all derived from the one series the API returns:
+//   1. a short-time Fourier transform of the displayed aggregate, drawn as a
+//      relative-energy spectrogram behind the traces;
+//   2. one trace per attack family on an auto-scaled magnitude axis (real ingress
+//      bandwidth where stream_alerts carries total_bytes, flows/min otherwise);
+//   3. a correlation readout — peak, overshoot over the vector's own median,
+//      Pearson correlation and cross-correlation lag against the dominant
+//      vector — plus a breach marker at the peak escalation bucket.
+//
+// Nothing in the readout is a hardcoded constant: every figure is computed from
+// the series that is drawn, and the two ML recalls come from the deployed
+// thresholds artifact rather than being restated here.
 
 let waterfallData = [];
+let waterfallMeta = { mode: 'live', bytes_available: false, gate: null, window_minutes: 60 };
+
+// paddingRight leaves room for the live-edge value labels, paddingLeft for the
+// magnitude ticks.
 const waterfallConfig = {
-    cellWidth: 12,
-    cellHeight: 24,
-    gap: 2,
-    paddingLeft: 100,
-    paddingBottom: 40
+    paddingLeft: 76,
+    paddingRight: 96,
+    paddingTop: 12,
+    paddingBottom: 44
 };
+
+// STFT window in buckets. 16 keeps the naive DFT trivial; floorDb sets the bottom
+// of the colour ramp (relative to the strongest bin of the displayed series).
+const SPECTRO = { window: 16, alpha: 0.38, minRangeDb: 18, floorPercentile: 0.25 };
+
+// Measured detector recall, keyed by the hold-out the deployed cut was calibrated
+// on (thresholds.json -> measured_recall_pct). Families with no measured number
+// are reported as NOT MEASURED rather than being given one.
+const MEASURED_RECALL_KEY = { 'DDoS': 'friday_ddos_test', 'Bot': 'friday_bot_test' };
+
+// Vectors the pipeline deliberately withholds from the auto-alert feed
+// (detection_policy.suppress_infiltration).
+const SUPPRESSED_VECTORS = { 'Infiltration': 'FP MITIGATION' };
+
+// Per-attack-type visual identity (dash pattern keeps lines distinguishable in
+// grayscale or when colors collide). Colors follow the dashboard's palette.
+const TRACE_STYLES = {
+    'DDoS':        { color: '#e03e3e', dash: [],             width: 2.2 },
+    'Bot':         { color: '#ffc58a', dash: [4, 3],         width: 1.6 },
+    'PortScan':    { color: '#ff9e1b', dash: [],             width: 1.6 },
+    'DoS':         { color: '#ffd166', dash: [3, 3],         width: 1.5 },
+    'Brute Force': { color: '#b45309', dash: [2, 2],         width: 1.4 },
+    'XSS':         { color: '#ff9891', dash: [6, 3],         width: 1.4 },
+    'Sql Injection': { color: '#ff9891', dash: [1, 2],       width: 1.4 },
+    'Infiltration': { color: '#ff9891', dash: [8, 3],        width: 1.4 },
+    'Attack (unclassified)': { color: '#9aa7bd', dash: [5, 4], width: 1.2 },
+    'Unknown':     { color: '#9aa7bd', dash: [5, 4],         width: 1.2 },
+    '_default':    { color: '#44f498', dash: [],             width: 1.4 }
+};
+
+function traceStyleFor(type) {
+    if (TRACE_STYLES[type]) return TRACE_STYLES[type];
+    // Fallback for unmapped labels: pick a stable pseudo-random entry so each
+    // type keeps a consistent color across refreshes.
+    const keys = Object.keys(TRACE_STYLES).filter(k => k !== '_default');
+    let h = 0;
+    for (let i = 0; i < type.length; i++) h = (h * 31 + type.charCodeAt(i)) >>> 0;
+    return TRACE_STYLES[keys[h % keys.length]];
+}
+
+// Lines the analyst has toggled off (persisted across refreshes in-session).
+const hiddenTraces = new Set();
+
+// Overlay mode. 'live' = escalated (post-threshold) alerts from stream_alerts,
+// which the deployed cut narrows to DDoS alone on this corpus. 'simulated' =
+// every pre-gate ML verdict from ml_alerts, i.e. the full multi-vector overlay
+// this view was built for. The API serves both from the same endpoint.
+let spectralMode = 'live';
+
+function applySpectralModeUI() {
+    const simulated = spectralMode === 'simulated';
+    const label = document.getElementById('btn-wf-mode-label');
+    const btn = document.getElementById('btn-wf-mode');
+    const badge = document.getElementById('wf-feed-badge');
+    const caption = document.getElementById('wf-mode-caption');
+    const note = document.getElementById('wf-mode-note');
+
+    if (label) label.textContent = simulated ? 'LIVE VERSION' : 'SIMULATED VERSION';
+    if (btn) {
+        btn.classList.toggle('border-primary', simulated);
+        btn.classList.toggle('text-primary', simulated);
+        btn.classList.toggle('border-outline-variant', !simulated);
+        btn.classList.toggle('text-on-surface-variant', !simulated);
+    }
+    if (badge) {
+        badge.textContent = simulated ? 'SIMULATED FEED' : 'LIVE FEED';
+        badge.className = simulated
+            ? 'font-label-sm text-label-sm text-primary-container'
+            : 'font-label-sm text-label-sm text-secondary animate-pulse';
+    }
+    if (caption) caption.textContent = spectralCaption(null);
+    if (note) note.style.display = simulated ? 'flex' : 'none';
+}
+
+// The caption carries both the data source and the magnitude basis, because the
+// two modes are never compared on one silent scale.
+function spectralCaption(basis) {
+    const mode = spectralMode === 'simulated'
+        ? '// PRE-GATE ML VERDICTS (ALL VECTORS)'
+        : '// ESCALATED ALERTS (POST-THRESHOLD)';
+    if (!basis) return mode;
+    return `${mode} · ${basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'}`;
+}
+
+function setSpectralMode(mode) {
+    const next = mode === 'simulated' ? 'simulated' : 'live';
+    if (next === spectralMode) return;
+    spectralMode = next;
+    // Trace visibility is per-mode: a vector hidden in one view should not
+    // silently hide the same-named line in the other.
+    hiddenTraces.clear();
+    applySpectralModeUI();
+    updateSpectralWaterfall();
+}
 
 async function updateSpectralWaterfall() {
     const canvas = document.getElementById('waterfallCanvas');
@@ -545,17 +655,472 @@ async function updateSpectralWaterfall() {
     }
 
     try {
-        const response = await fetch(`${API_BASE}/analytics/waterfall?minutes=60`);
+        const response = await fetch(`${API_BASE}/analytics/waterfall?minutes=60&mode=${spectralMode}`);
         const data = await response.json();
         
         if (data.waterfall) {
             waterfallData = data.waterfall;
+            waterfallMeta = {
+                mode: data.mode || 'live',
+                bytes_available: !!data.bytes_available,
+                gate: data.gate || null,
+                window_minutes: data.window_minutes || 60
+            };
             drawWaterfall();
         }
     } catch (error) {
         console.error('Failed to update waterfall:', error);
     }
 }
+
+function buildTraceToggles(metrics, scale) {
+    const wrap = document.getElementById('wf-trace-toggles');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    metrics.forEach(m => {
+        const type = m.type;
+        const st = traceStyleFor(type);
+        const label = document.createElement('label');
+        label.className = 'flex items-center gap-1 bg-surface-container px-space-xs py-0.5 border cursor-pointer hover:bg-surface-container-high transition-colors';
+        label.style.borderColor = st.color + '66';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !hiddenTraces.has(type);
+        cb.style.accentColor = st.color;
+        cb.addEventListener('change', () => {
+            if (cb.checked) hiddenTraces.delete(type); else hiddenTraces.add(type);
+            drawWaterfall();
+        });
+        const swatch = document.createElement('span');
+        swatch.className = 'inline-block w-2';
+        swatch.style.height = st.dash.length ? '0' : '2px';
+        swatch.style.background = st.color;
+        if (st.dash.length) {
+            swatch.style.borderTop = `2px dashed ${st.color}`;
+            swatch.style.background = 'transparent';
+        }
+        const name = document.createElement('span');
+        name.className = 'font-bold font-mono text-[10px]';
+        name.style.color = st.color;
+        name.textContent = `${type} [peak ${fmtValue(m.peak, scale)} ${scale.unit}]`;
+        label.title = `${m.alerts} alert(s) in window · shape: ${m.shape}`;
+        label.appendChild(cb); label.appendChild(swatch); label.appendChild(name);
+        wrap.appendChild(label);
+    });
+}
+
+// ── Statistics helpers ───────────────────────────────────────────────────────
+
+function spectralMean(a) { return a.length ? a.reduce((s, v) => s + v, 0) / a.length : 0; }
+
+function spectralMedian(a) {
+    if (!a.length) return 0;
+    const s = a.slice().sort((x, y) => x - y);
+    const mid = s.length >> 1;
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function spectralStd(a) {
+    if (!a.length) return 0;
+    const m = spectralMean(a);
+    return Math.sqrt(spectralMean(a.map(v => (v - m) * (v - m))));
+}
+
+// Pearson correlation over the overlapping prefix of two series.
+function pearson(a, b) {
+    const n = Math.min(a.length, b.length);
+    if (n < 3) return 0;
+    const xa = a.slice(0, n), xb = b.slice(0, n);
+    const ma = spectralMean(xa), mb = spectralMean(xb);
+    let num = 0, da = 0, db = 0;
+    for (let i = 0; i < n; i++) {
+        const x = xa[i] - ma, y = xb[i] - mb;
+        num += x * y; da += x * x; db += y * y;
+    }
+    if (da <= 0 || db <= 0) return 0;
+    return num / Math.sqrt(da * db);
+}
+
+// Lag of `b` relative to `a`, in buckets, by maximising Pearson correlation over
+// the overlap. A positive lag means b's shape appears *after* a's.
+function bestLag(a, b, maxLag) {
+    let best = { lag: 0, r: -2 };
+    for (let lag = -maxLag; lag <= maxLag; lag++) {
+        const as = lag >= 0 ? a.slice(0, a.length - lag) : a.slice(-lag);
+        const bs = lag >= 0 ? b.slice(lag) : b.slice(0, b.length + lag);
+        const r = pearson(as, bs);
+        if (r > best.r) best = { lag, r: isFinite(r) ? r : 0 };
+    }
+    return best;
+}
+
+// Heuristic shape label derived only from the plotted series: how much of the
+// window is active, how concentrated the mass is in its top buckets, how flat the
+// flat runs are, and the spread relative to its own mean.
+function classifyShape(vals) {
+    const total = vals.reduce((s, v) => s + v, 0);
+    const m = spectralMean(vals);
+    if (total <= 0 || m <= 0) return 'NO SIGNAL';
+    const cv = spectralStd(vals) / m;
+    const deltas = vals.slice(1).map((v, i) => Math.abs(v - vals[i]));
+    const maxDelta = Math.max.apply(null, deltas.concat([1e-9]));
+    const flat = deltas.filter(d => d <= maxDelta * 0.02).length / deltas.length;
+    const active = vals.filter(v => v > 0.15 * m).length / vals.length;
+    const top3 = vals.slice().sort((a, b) => b - a).slice(0, 3)
+        .reduce((s, v) => s + v, 0) / total;
+    if (active < 0.45 || top3 > 0.5) return 'MICRO-BURST';
+    if (flat > 0.3) return 'STEPPED SWEEP';
+    if (cv < 0.22) return 'SUSTAINED FLOOR';
+    if (cv > 0.85) return 'BURSTY';
+    return 'OSCILLATING';
+}
+
+// ── Magnitude basis ──────────────────────────────────────────────────────────
+// stream_alerts rows carry total_bytes, so a genuine ingress-bandwidth axis is
+// available and rows are per-minute totals (bits/s = bytes * 8 / 60).  ml_alerts
+// carries no byte or packet fields, so the simulated overlay is plotted in flows.
+// The unit is always labelled, so the two modes are never silently read off one
+// scale.
+
+function magnitudeBasis() {
+    return waterfallMeta.bytes_available ? 'bandwidth' : 'flows';
+}
+
+function bandScaleFor(peakBytes) {
+    const bps = peakBytes * 8 / 60;
+    if (bps >= 1e9) return { unit: 'Gbps', factor: 8 / 60 / 1e9, digits: 2 };
+    if (bps >= 1e6) return { unit: 'Mbps', factor: 8 / 60 / 1e6, digits: 1 };
+    if (bps >= 1e3) return { unit: 'kbps', factor: 8 / 60 / 1e3, digits: 1 };
+    return { unit: 'bps', factor: 8 / 60, digits: 0 };
+}
+
+function metricScale(basis, peakBytes) {
+    return basis === 'bandwidth'
+        ? bandScaleFor(peakBytes)
+        : { unit: 'FLOWS/MIN', factor: 1, digits: 0 };
+}
+
+function valueForRow(row) {
+    if (!row) return 0;
+    return magnitudeBasis() === 'bandwidth' ? (row.bytes || 0) : (row.connections || 0);
+}
+
+function fmtValue(v, scale) {
+    const x = v * scale.factor;
+    if (scale.unit === 'FLOWS/MIN') return Math.round(x).toLocaleString();
+    if (Math.abs(x) >= 100) return x.toFixed(0);
+    if (Math.abs(x) >= 10) return x.toFixed(Math.max(1, scale.digits - 1));
+    return x.toFixed(scale.digits);
+}
+
+function niceStep(raw) {
+    if (!(raw > 0)) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    return (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+}
+
+// ── Spectrogram (STFT of the displayed aggregate) ────────────────────────────
+
+function hannWindow(n) {
+    const w = new Array(n);
+    for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+    return w;
+}
+
+// Naive DFT. A 16-bucket window over a 60-bucket span is <=45 frames, so O(n^2)
+// costs ~11k multiply-adds per redraw — cheaper than carrying an FFT.
+function dftMagnitudes(frame) {
+    const n = frame.length, half = n >> 1;
+    const out = new Array(half + 1);
+    for (let k = 0; k <= half; k++) {
+        let re = 0, im = 0;
+        for (let t = 0; t < n; t++) {
+            const a = (-2 * Math.PI * k * t) / n;
+            re += frame[t] * Math.cos(a);
+            im += frame[t] * Math.sin(a);
+        }
+        out[k] = Math.sqrt(re * re + im * im);
+    }
+    return out;
+}
+
+// Relative-energy spectrogram of the aggregate series being plotted. This is a
+// real STFT of real telemetry — a surge lights up as broadband energy — but it is
+// a spectrum of the alert series over time, not of packets on the wire, so the
+// magnitudes are normalised to the strongest bin and reported in relative dB.
+function computeSpectrogram(values) {
+    const win = SPECTRO.window;
+    if (values.length < win) return null;
+    const w = hannWindow(win);
+    const frames = [];
+    for (let start = 0; start + win <= values.length; start++) {
+        // Each frame is mean-removed before windowing. Without this the DC bin
+        // dominates every frame and the display degenerates into a bright band
+        // at the level of the series, hiding the time-frequency structure.
+        const seg = values.slice(start, start + win);
+        const segMean = spectralMean(seg);
+        const frame = new Array(win);
+        for (let i = 0; i < win; i++) frame[i] = (seg[i] - segMean) * w[i];
+        frames.push(dftMagnitudes(frame));
+    }
+    let peak = 0;
+    frames.forEach(f => f.forEach(m => { if (m > peak) peak = m; }));
+    if (!(peak > 0)) return null;
+    const db = frames.map(f => f.map(m => 20 * Math.log10(Math.max(m, 1e-9) / peak)));
+
+    // The colour floor is measured, not fixed: most cells of a spiky series sit
+    // well below its strongest bin, and a fixed floor either washes the whole
+    // plot out or hides the structure. Floor at the 25th percentile, keeping a
+    // minimum range so a flat series still shows contrast.
+    const flat = db.reduce((acc, row) => acc.concat(row), []).sort((a, b) => a - b);
+    const pick = p => flat[Math.min(flat.length - 1, Math.max(0, Math.round(p * (flat.length - 1))))];
+    const floorDb = Math.min(pick(SPECTRO.floorPercentile), -SPECTRO.minRangeDb);
+
+    return {
+        window: win,
+        frames: frames.length,
+        bins: frames[0].length,
+        floorDb,
+        db
+    };
+}
+
+function spectroRGB(db, floorDb) {
+    const t = Math.max(0, Math.min(1, (db - floorDb) / -(floorDb || -1)));
+    // Deliberately weighted dark: the traces have to stay legible on top, so only
+    // the strongest bins reach amber.
+    const stops = [
+        [0.00, [4, 7, 6]],
+        [0.45, [26, 8, 10]],
+        [0.70, [96, 22, 20]],
+        [0.88, [186, 62, 32]],
+        [1.00, [255, 158, 27]]
+    ];
+    for (let i = 1; i < stops.length; i++) {
+        if (t <= stops[i][0]) {
+            const t0 = stops[i - 1][0], c0 = stops[i - 1][1];
+            const t1 = stops[i][0], c1 = stops[i][1];
+            const f = (t - t0) / (t1 - t0 || 1);
+            return [
+                Math.round(c0[0] + (c1[0] - c0[0]) * f),
+                Math.round(c0[1] + (c1[1] - c0[1]) * f),
+                Math.round(c0[2] + (c1[2] - c0[2]) * f)
+            ];
+        }
+    }
+    return [255, 220, 168];
+}
+
+let spectroCanvas = null;
+
+function drawSpectrogram(ctx, pl, pt, plotW, plotH, values) {
+    const spec = computeSpectrogram(values);
+    if (!spec) return null;
+    if (!spectroCanvas) spectroCanvas = document.createElement('canvas');
+    if (spectroCanvas.width !== spec.frames || spectroCanvas.height !== spec.bins) {
+        spectroCanvas.width = spec.frames;
+        spectroCanvas.height = spec.bins;
+    }
+    const sctx = spectroCanvas.getContext('2d');
+    const img = sctx.createImageData(spec.frames, spec.bins);
+    for (let f = 0; f < spec.frames; f++) {
+        for (let b = 0; b < spec.bins; b++) {
+            // Bin 0 is drawn at the bottom, Nyquist at the top.
+            const y = spec.bins - 1 - b;
+            const rgb = spectroRGB(spec.db[f][b], spec.floorDb);
+            const o = (y * spec.frames + f) * 4;
+            img.data[o] = rgb[0];
+            img.data[o + 1] = rgb[1];
+            img.data[o + 2] = rgb[2];
+            img.data[o + 3] = 255;
+        }
+    }
+    sctx.putImageData(img, 0, 0);
+    ctx.save();
+    ctx.globalAlpha = SPECTRO.alpha;
+    ctx.drawImage(spectroCanvas, pl, pt, plotW, plotH);
+    ctx.restore();
+    return spec;
+}
+
+function renderSpectroLegend(spec, basis) {
+    const host = document.getElementById('wf-spectro-legend');
+    const ramp = document.getElementById('wf-spectro-ramp');
+    if (!host) return;
+    if (!spec) { host.style.display = 'none'; return; }
+    host.style.display = 'flex';
+    const rampStops = [];
+    for (let i = 0; i <= 8; i++) {
+        const rgb = spectroRGB(spec.floorDb * (1 - i / 8), spec.floorDb);
+        rampStops.push(`rgb(${rgb[0]},${rgb[1]},${rgb[2]}) ${(i / 8) * 100}%`);
+    }
+    if (ramp) ramp.style.background = `linear-gradient(to right, ${rampStops.join(', ')})`;
+    const minEl = document.getElementById('wf-spectro-min');
+    const maxEl = document.getElementById('wf-spectro-max');
+    if (minEl) minEl.textContent = `${spec.floorDb.toFixed(0)} dB`;
+    if (maxEl) maxEl.textContent = '0 dB';
+    const basisEl = document.getElementById('wf-spectro-basis');
+    if (basisEl) {
+        basisEl.textContent = `STFT ${spec.window}-BUCKET HANN · ${spec.frames} FRAMES · RELATIVE ENERGY${basis === 'flows' ? ' · FLOWS BASIS' : ''}`;
+    }
+}
+
+// ── Per-vector metrics ───────────────────────────────────────────────────────
+
+function computeSpectralMetrics(bucketKeys, seriesMap, types) {
+    const series = {};
+    types.forEach(t => { series[t] = bucketKeys.map(k => valueForRow(seriesMap[t][k])); });
+    const peakOf = t => (series[t].length ? Math.max.apply(null, series[t]) : 0);
+    const ordered = types.slice().sort((a, b) => peakOf(b) - peakOf(a));
+    const dominant = ordered[0];
+    const maxLag = Math.min(15, Math.max(1, bucketKeys.length - 2));
+    const recalls = (waterfallMeta.gate && waterfallMeta.gate.measured_recall_pct) || {};
+
+    return ordered.map(type => {
+        const vals = series[type];
+        const peak = peakOf(type);
+        const base = spectralMedian(vals);
+        const lag = type === dominant ? { lag: 0, r: 1 } : bestLag(series[dominant], vals, maxLag);
+        let alerts = 0;
+        bucketKeys.forEach(k => { alerts += (seriesMap[type][k] && seriesMap[type][k].count) || 0; });
+        const recallKey = MEASURED_RECALL_KEY[type];
+        return {
+            type,
+            series: vals,
+            peak,
+            peakIdx: vals.indexOf(peak),
+            base,
+            surgePct: base > 0 ? (peak / base - 1) * 100 : 0,
+            alerts,
+            corr: lag.r,
+            lagBuckets: lag.lag,
+            lagSeconds: lag.lag * 60,
+            shape: classifyShape(vals),
+            recall: recallKey && recalls[recallKey] != null ? recalls[recallKey] : null,
+            recallKey: recallKey || null,
+            suppressed: SUPPRESSED_VECTORS[type] || null,
+            isDominant: type === dominant
+        };
+    });
+}
+
+function renderCorrelationPanel(metrics, scale, bucketKeys, basis, breach) {
+    const rows = document.getElementById('wf-corr-rows');
+    if (rows) {
+        if (!metrics.length) {
+            rows.innerHTML = '<span class="text-on-surface-variant">NO VISIBLE VECTORS</span>';
+        } else {
+            rows.innerHTML = metrics.map(m => {
+                const st = traceStyleFor(m.type);
+                const lagText = m.isDominant
+                    ? 'REFERENCE'
+                    : `LAG ${m.lagBuckets > 0 ? '+' : ''}${m.lagBuckets}M (${m.lagSeconds}s)`;
+                const recallText = m.recall != null
+                    ? `ML ${m.recall.toFixed(2)}% RECALL`
+                    : (m.suppressed ? `ML SUPPRESSED (${m.suppressed})` : 'ML NOT MEASURED');
+                const recallClass = m.recall != null
+                    ? (m.recall >= 90 ? 'text-secondary' : 'text-primary-container')
+                    : (m.suppressed ? 'text-primary-container' : 'text-on-surface-variant');
+                const title = `${m.alerts} alert(s) in window · median baseline ${fmtValue(m.base, scale)} ${scale.unit}`;
+                return `
+                    <div class="flex items-center gap-space-xs min-w-0 bg-surface-container/60 px-space-xs py-0.5 border border-outline-variant/20" title="${title}">
+                        <span class="w-2 h-2 shrink-0 inline-block" style="background:${st.color}"></span>
+                        <span class="font-bold shrink-0" style="color:${st.color}">${m.type}</span>
+                        <span class="text-on-surface font-bold shrink-0">${fmtValue(m.peak, scale)} ${scale.unit}</span>
+                        <span class="text-on-surface-variant shrink-0">(+${m.surgePct.toFixed(0)}%)</span>
+                        <span class="text-on-surface-variant shrink-0" title="Pearson correlation and cross-correlation lag against the dominant vector">[r ${m.corr.toFixed(2)} · ${lagText}]</span>
+                        <span class="px-space-xs border shrink-0 ${m.isDominant ? 'border-error/50 text-error' : 'border-outline-variant/40 text-on-surface-variant'}" title="Heuristic shape label computed from the coefficient of variation and step count of the plotted series">${m.shape}</span>
+                        <span class="shrink-0 ${recallClass}" ${m.recallKey ? `title="thresholds.json measured_recall_pct.${m.recallKey} at the deployed cut"` : ''}>${recallText}</span>
+                    </div>`;
+            }).join('');
+        }
+    }
+
+    const basisEl = document.getElementById('wf-corr-basis');
+    if (basisEl) {
+        basisEl.textContent = `BASIS: ${basis === 'bandwidth' ? 'INGRESS BANDWIDTH (total_bytes)' : 'FLOW VOLUME (flow_count)'}`;
+    }
+
+    const winEl = document.getElementById('wf-corr-window');
+    if (winEl) {
+        const first = bucketKeys[0] || '';
+        const last = bucketKeys[bucketKeys.length - 1] || '';
+        winEl.textContent = `[${bucketKeys.length} BUCKETS | 1M] ${first ? first.substring(11, 16) : '--'}→${last ? last.substring(11, 16) : '--'}`;
+    }
+
+    const gate = waterfallMeta.gate || {};
+    const gateEl = document.getElementById('wf-corr-gate');
+    if (gateEl) {
+        const cut = gate.attack_threshold != null ? `P(ATTACK)≥${gate.attack_threshold.toFixed(4)}` : 'P(ATTACK) UNREAD';
+        const spike = gate.spike_threshold_conn_per_window != null ? `SPIKE≥${gate.spike_threshold_conn_per_window}/MIN` : 'SPIKE UNREAD';
+        gateEl.textContent = `GATE: ${cut} · ${spike}`;
+        gateEl.title = gate.error
+            ? `Thresholds artifact unreadable: ${gate.error}`
+            : `Read from ${gate.source}${gate.generated_at ? ` (generated ${gate.generated_at})` : ''}`;
+    }
+
+    const breachEl = document.getElementById('wf-corr-breach');
+    if (breachEl) {
+        if (breach) {
+            // The marker tracks the aggregate of the visible vectors, so say so
+            // rather than implying it is any single family's peak.
+            breachEl.textContent = `BREACH LOCK: T-${breach.idxFromEnd}M AGG ${fmtValue(breach.value, scale)} ${scale.unit}`;
+            breachEl.className = 'px-space-xs py-0.5 border border-error bg-error-container/20 text-error font-bold';
+        } else {
+            breachEl.textContent = 'BREACH LOCK: NONE';
+            breachEl.className = 'px-space-xs py-0.5 border border-outline-variant/50 bg-surface-container text-on-surface-variant font-bold';
+        }
+    }
+
+    const suppressEl = document.getElementById('wf-corr-suppress');
+    if (suppressEl) {
+        const suppressed = metrics.filter(m => m.suppressed);
+        if (suppressed.length) {
+            suppressEl.textContent = `SUPPRESS: ${suppressed.map(m => m.type).join(', ')}`;
+            suppressEl.className = 'px-space-xs py-0.5 border border-primary-container bg-primary-container/20 text-primary-container font-bold';
+            suppressEl.title = 'These families are routed to manual review instead of the auto-alert feed. Only the auto-alert feed is drawn here.';
+        } else {
+            suppressEl.textContent = 'SUPPRESS: NONE';
+            suppressEl.className = 'px-space-xs py-0.5 border border-outline-variant/50 bg-surface-container text-on-surface-variant font-bold';
+        }
+    }
+
+    const conclusionEl = document.getElementById('wf-corr-conclusion');
+    if (conclusionEl) conclusionEl.textContent = buildConclusion(metrics, scale, breach);
+}
+
+// Reads the correlation matrix in plain language. Every clause is backed by a
+// number in the rows above it; this is a heuristic over the plotted series, not a
+// classifier verdict. The bar for claiming staged traffic is deliberately high --
+// on per-minute alert volumes a |r| under 0.5 is noise, and saying so is more
+// useful than narrating it.
+const MIN_NARRATIVE_CORR = 0.5;
+
+function buildConclusion(metrics, scale, breach) {
+    if (!metrics.length) return 'ANALYST CONCLUSION (HEURISTIC): NO VISIBLE VECTORS';
+    const dom = metrics[0];
+    const lead = metrics.slice(1)
+        .filter(m => Math.abs(m.corr) >= MIN_NARRATIVE_CORR)
+        .sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr))[0];
+    const domStr = `${dom.type} AT ${fmtValue(dom.peak, scale)} ${scale.unit} (+${dom.surgePct.toFixed(0)}% OVER ITS OWN MEDIAN)`;
+    const tail = breach ? ` BREACH LOCK AT T-${breach.idxFromEnd}M.` : '';
+
+    if (lead && lead.lagBuckets > 0) {
+        return `ANALYST CONCLUSION (HEURISTIC): ${lead.type} TRAILS THE ${dom.type} SURGE BY ${lead.lagBuckets} BUCKET(S) (${lead.lagSeconds}s) AT r=${lead.corr.toFixed(2)} — CONSISTENT WITH STAGED SECONDARY TRAFFIC INSIDE THE ${dom.type} ENVELOPE. DOMINANT VECTOR: ${domStr}.${tail}`;
+    }
+    if (lead && lead.lagBuckets < 0) {
+        return `ANALYST CONCLUSION (HEURISTIC): ${lead.type} LEADS THE ${dom.type} SURGE BY ${Math.abs(lead.lagBuckets)} BUCKET(S) (${Math.abs(lead.lagSeconds)}s) AT r=${lead.corr.toFixed(2)} — POSSIBLE RECONNAISSANCE PRECURSOR. DOMINANT VECTOR: ${domStr}.${tail}`;
+    }
+    if (lead) {
+        return `ANALYST CONCLUSION (HEURISTIC): ${dom.type} AND ${lead.type} CO-MOVE AT r=${lead.corr.toFixed(2)} WITH ZERO LAG — SINGLE CAMPAIGN RATHER THAN INDEPENDENT EVENTS. DOMINANT VECTOR: ${domStr}.${tail}`;
+    }
+    const best = metrics.slice(1).sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr))[0];
+    const bestStr = best ? ` STRONGEST OTHER PAIRING: ${best.type} AT r=${best.corr.toFixed(2)}.` : '';
+    return `ANALYST CONCLUSION (HEURISTIC): NO CROSS-VECTOR CORRELATION AT OR ABOVE r=${MIN_NARRATIVE_CORR.toFixed(2)} — VECTORS INDEPENDENT. DOMINANT VECTOR: ${domStr}.${bestStr}${tail}`;
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
 
 function drawWaterfall() {
     const container = document.getElementById('waterfall-grid');
@@ -570,107 +1135,259 @@ function drawWaterfall() {
         canvas.height = height;
     }
     
+    ctx.fillStyle = '#030604';
+    ctx.fillRect(0, 0, width, height);
+    ctx.font = '10px JetBrains Mono';
+
     if (!waterfallData || waterfallData.length === 0) {
-        ctx.fillStyle = '#0c0f0e';
-        ctx.fillRect(0, 0, width, height);
         ctx.fillStyle = '#dac2ae';
-        ctx.font = '12px JetBrains Mono';
         ctx.textAlign = 'center';
         ctx.fillText('NO THREAT DENSITY DATA AVAILABLE', width/2, height/2);
+        renderSpectroLegend(null, null);
         return;
     }
 
-    const attackTypes = [...new Set(waterfallData.map(d => d.attack_type))].sort();
-    const allTimestamps = [...new Set(waterfallData.map(d => d.timestamp))].sort();
-    const xBuckets = allTimestamps.length > 0 ? allTimestamps : [new Date().toISOString().substring(0, 16) + ':00'];
-    
-    const cw = waterfallConfig.cellWidth;
-    const ch = waterfallConfig.cellHeight;
-    const gap = waterfallConfig.gap;
-    const pl = waterfallConfig.paddingLeft;
-    const pb = waterfallConfig.paddingBottom;
-    
-    ctx.fillStyle = '#0c0f0e';
-    ctx.fillRect(0, 0, width, height);
-    
-    ctx.fillStyle = '#dac2ae';
-    ctx.font = '10px JetBrains Mono';
+    const { paddingLeft: pl, paddingRight: pr, paddingTop: pt, paddingBottom: pb } = waterfallConfig;
+    const plotW = width - pl - pr;
+    const plotH = height - pt - pb;
+
+    // Time axis: use the API's bucket string so every type shares the same X grid.
+    const bucketKeys = [...new Set(waterfallData.map(d => d.timestamp))].sort();
+    if (bucketKeys.length === 0) return;
+    const bucketCount = bucketKeys.length;
+    const xFor = i => pl + (bucketCount === 1 ? plotW / 2 : (i / (bucketCount - 1)) * plotW);
+
+    // Series: one per attack family, sharing the bucket grid. Whole rows are kept
+    // because which field is the magnitude depends on the mode's basis.
+    const seriesMap = {};
+    waterfallData.forEach(d => {
+        if (!seriesMap[d.attack_type]) seriesMap[d.attack_type] = {};
+        seriesMap[d.attack_type][d.timestamp] = d;
+    });
+    const allTypes = Object.keys(seriesMap).sort();
+    const visibleTypes = allTypes.filter(t => !hiddenTraces.has(t));
+
+    // Magnitude scale is derived from the whole window (every family, not just the
+    // visible ones) so hiding a trace never rescales the axis under the analyst.
+    const basis = magnitudeBasis();
+    let peakBytes = 0;
+    allTypes.forEach(t => bucketKeys.forEach(k => {
+        const row = seriesMap[t][k];
+        if (row && (row.bytes || 0) > peakBytes) peakBytes = row.bytes;
+    }));
+    const scale = metricScale(basis, peakBytes);
+
+    // Toggles are built from every family so they stay available when the last
+    // visible trace is switched off.
+    buildTraceToggles(computeSpectralMetrics(bucketKeys, seriesMap, allTypes), scale);
+
+    const metrics = computeSpectralMetrics(bucketKeys, seriesMap, visibleTypes);
+    if (!metrics.length) {
+        ctx.fillStyle = '#dac2ae';
+        ctx.textAlign = 'center';
+        ctx.fillText('ALL TRACES HIDDEN - ENABLE A VECTOR TRACE ABOVE', width/2, height/2);
+        renderSpectroLegend(null, basis);
+        renderCorrelationPanel([], scale, bucketKeys, basis, null);
+        return;
+    }
+
+    // Aggregate over the visible vectors drives the spectrogram and the breach
+    // marker, so both answer "what the analyst is actually looking at".
+    const aggregate = bucketKeys.map(k => visibleTypes.reduce((s, t) => s + valueForRow(seriesMap[t][k]), 0));
+
+    // Nice Y maximum in display units.
+    let yMax = 0;
+    metrics.forEach(m => m.series.forEach(v => { const d = v * scale.factor; if (d > yMax) yMax = d; }));
+    const step = niceStep(Math.max(yMax / 5, 1e-9));
+    const yTop = Math.max(step, Math.ceil(yMax / step) * step);
+    const yFor = v => pt + plotH - (v / yTop) * plotH;
+    const yForDisplay = v => yFor(v * scale.factor);
+
+    // Caption carries the source and the magnitude basis together.
+    const captionEl = document.getElementById('wf-mode-caption');
+    if (captionEl) captionEl.textContent = spectralCaption(basis);
+
+    // Layer 1 — spectrogram of the aggregate, behind everything.
+    const spec = drawSpectrogram(ctx, pl, pt, plotW, plotH, aggregate);
+    renderSpectroLegend(spec, basis);
+
+    // Grid + magnitude ticks
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    
-    attackTypes.forEach((type, yIndex) => {
-        const y = yIndex * (ch + gap) + ch/2;
-        ctx.fillText(type, pl - 10, y);
-        ctx.strokeStyle = '#282b29';
+    ctx.font = '10px JetBrains Mono';
+    for (let v = 0; v <= yTop + 1e-9; v += step) {
+        const y = yFor(v);
+        ctx.strokeStyle = 'rgba(84, 68, 52, 0.18)';
         ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(pl, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-    });
-    
-    const matrix = {};
-    attackTypes.forEach(t => matrix[t] = {});
-    let maxCount = 1;
-    
-    waterfallData.forEach(d => {
-        matrix[d.attack_type][d.timestamp] = d;
-        if (d.count > maxCount) maxCount = d.count;
-    });
-    
-    const getColor = (count, max) => {
-        if (!count || count === 0) return '#1d201f';
-        const ratio = Math.min(count / Math.max(max, 5), 1.0);
-        if (ratio < 0.3) return `rgba(68, 244, 152, ${0.2 + ratio})`;
-        if (ratio < 0.7) return `rgba(255, 158, 27, ${0.4 + ratio})`;
-        return `rgba(255, 180, 171, ${0.6 + ratio})`;
-    };
-    
-    const maxCols = Math.floor((width - pl) / (cw + gap));
-    const startIdx = Math.max(0, xBuckets.length - maxCols);
-    const visibleBuckets = xBuckets.slice(startIdx);
-    
-    canvas.waterfallLayout = {
-        attackTypes,
-        visibleBuckets,
-        matrix,
-        cw, ch, gap, pl, pb,
-        rects: []
-    };
+        ctx.beginPath(); ctx.moveTo(pl, y); ctx.lineTo(pl + plotW, y); ctx.stroke();
+        ctx.fillStyle = '#dac2ae';
+        ctx.fillText(fmtValue(v / scale.factor, scale), pl - 6, y);
+    }
+    // Axis unit, so the basis is never ambiguous between the two modes.
+    ctx.save();
+    ctx.translate(11, pt + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffc58a';
+    ctx.font = '9px JetBrains Mono';
+    ctx.fillText(scale.unit, 0, 0);
+    ctx.restore();
 
-    attackTypes.forEach((type, yIndex) => {
-        const y = yIndex * (ch + gap);
-        visibleBuckets.forEach((ts, xIndex) => {
-            const x = pl + xIndex * (cw + gap);
-            const cellData = matrix[type][ts];
-            const count = cellData ? cellData.count : 0;
-            ctx.fillStyle = getColor(count, maxCount);
-            ctx.fillRect(x, y, cw, ch);
-            canvas.waterfallLayout.rects.push({
-                x, y, w: cw, h: ch,
-                data: cellData || { attack_type: type, timestamp: ts, count: 0, connections: 0 }
-            });
-        });
-    });
-    
-    ctx.fillStyle = '#dac2ae';
+    // X tick labels (time buckets, thinned to fit)
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const labelStep = Math.max(1, Math.floor(visibleBuckets.length / 8));
-    
-    visibleBuckets.forEach((ts, xIndex) => {
-        if (xIndex % labelStep === 0 || xIndex === visibleBuckets.length - 1) {
-            const x = pl + xIndex * (cw + gap) + cw/2;
-            const y = attackTypes.length * (ch + gap) + 5;
-            const timeStr = ts.substring(11, 16);
-            ctx.fillText(timeStr, x, y);
-            ctx.strokeStyle = '#544434';
-            ctx.beginPath();
-            ctx.moveTo(x, y - 5);
-            ctx.lineTo(x, y - 2);
-            ctx.stroke();
-        }
+    const labelStep = Math.max(1, Math.ceil(bucketCount / Math.max(4, Math.floor(plotW / 70))));
+    bucketKeys.forEach((ts, i) => {
+        if (i % labelStep !== 0 && i !== bucketCount - 1) return;
+        const x = xFor(i);
+        ctx.strokeStyle = 'rgba(84, 68, 52, 0.18)';
+        ctx.beginPath(); ctx.moveTo(x, pt); ctx.lineTo(x, pt + plotH); ctx.stroke();
+        ctx.fillStyle = '#dac2ae';
+        ctx.fillText(ts.length >= 16 ? ts.substring(11, 16) : ts, x, pt + plotH + 6);
     });
+
+    // Layer 2 — baseline + breach markers on the aggregate
+    const aggregateDisplay = aggregate.map(v => v * scale.factor);
+    const aggBase = spectralMedian(aggregateDisplay);
+    const hasSignal = aggregateDisplay.some(v => v > 0);
+    const breachIdx = hasSignal ? aggregateDisplay.indexOf(Math.max.apply(null, aggregateDisplay)) : -1;
+    const breach = breachIdx >= 0
+        ? { idx: breachIdx, idxFromEnd: bucketCount - 1 - breachIdx, value: aggregate[breachIdx] }
+        : null;
+
+    // The marker *lines* sit under the traces so they never chop them up; their
+    // labels are drawn last (see "annotation labels" below) so the traces never
+    // chop the labels up either.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(pl, pt, plotW, plotH); ctx.clip();
+    if (aggBase > 0) {
+        const by = yFor(aggBase);
+        ctx.strokeStyle = 'rgba(218, 194, 174, 0.45)';
+        ctx.setLineDash([2, 4]);
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(pl, by); ctx.lineTo(pl + plotW, by); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    if (breach) {
+        const bx = xFor(breach.idx);
+        ctx.strokeStyle = 'rgba(224, 62, 62, 0.75)';
+        ctx.setLineDash([5, 3]);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(bx, pt); ctx.lineTo(bx, pt + plotH); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    ctx.restore();
+
+    // Layer 3 — one trace per visible family, all on the shared axes.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pl, pt - 2, plotW, plotH + 4);
+    ctx.clip();
+    metrics.forEach(m => {
+        const st = traceStyleFor(m.type);
+        ctx.strokeStyle = st.color;
+        ctx.lineWidth = st.width;
+        ctx.setLineDash(st.dash);
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.globalAlpha = 0.95;
+        ctx.beginPath();
+        m.series.forEach((v, i) => {
+            const x = xFor(i), y = yForDisplay(v);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+    });
+    ctx.restore();
+
+    // Annotation labels, on top of everything and on a backing plate: the
+    // spectrogram is brightest exactly where these land, and the traces cross them.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(pl, pt, plotW, plotH); ctx.clip();
+    ctx.font = '9px JetBrains Mono';
+    if (aggBase > 0) {
+        const baseLabel = `AGG BASELINE ${fmtValue(aggBase / scale.factor, scale)} ${scale.unit}`;
+        const by = yFor(aggBase);
+        const bw = ctx.measureText(baseLabel).width;
+        ctx.fillStyle = 'rgba(3, 6, 4, 0.85)';
+        ctx.fillRect(pl + 3, by - 13, bw + 6, 12);
+        ctx.fillStyle = 'rgba(218, 194, 174, 0.95)';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(baseLabel, pl + 6, by - 2);
+    }
+    if (breach) {
+        const bx = xFor(breach.idx);
+        const flip = breach.idx > bucketCount * 0.75;
+        const breachLabel = `BREACH LOCK T-${breach.idxFromEnd}M`;
+        ctx.font = 'bold 9px JetBrains Mono';
+        ctx.textAlign = flip ? 'right' : 'left';
+        ctx.textBaseline = 'top';
+        const bw = ctx.measureText(breachLabel).width;
+        const bx0 = flip ? bx - 4 - bw - 4 : bx + 1;
+        ctx.fillStyle = 'rgba(3, 6, 4, 0.85)';
+        ctx.fillRect(bx0, pt + 2, bw + 6, 12);
+        ctx.fillStyle = '#ff6b6b';
+        ctx.fillText(breachLabel, bx0 + 3, pt + 4);
+    }
+    ctx.restore();
+
+    // Current-value dots + labels at the live edge (right, beside the last bucket).
+    const liveX = xFor(bucketCount - 1);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = '9px JetBrains Mono';
+
+    // De-overlap the edge labels, then shift the whole stack so the lowest one
+    // does not collide with the time axis. Low-volume vectors all pile up near
+    // zero, so without the clamp their labels land on the tick row.
+    const labelItems = metrics.map(m => {
+        const last = m.series[m.series.length - 1] || 0;
+        const y = yForDisplay(last);
+        return { style: traceStyleFor(m.type), label: `${m.type}: ${fmtValue(last, scale)}`, y, ly: y };
+    });
+    const placed = [];
+    labelItems.forEach(it => {
+        while (placed.some(s => Math.abs(s - it.ly) < 11)) it.ly += 11;
+        placed.push(it.ly);
+    });
+    const hi = Math.max.apply(null, placed);
+    const lo = Math.min.apply(null, placed);
+    let shift = 0;
+    if (hi > pt + plotH - 4) shift = pt + plotH - 4 - hi;
+    else if (lo < pt + 6) shift = pt + 6 - lo;
+    labelItems.forEach(it => {
+        ctx.fillStyle = it.style.color;
+        ctx.beginPath();
+        ctx.arc(liveX, it.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#0c0f0e';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillText(it.label, liveX + 6, it.ly + shift);
+    });
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillStyle = '#44f498';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('T-0 [LIVE]', liveX, pt + plotH + 6);
+
+    renderCorrelationPanel(metrics, scale, bucketKeys, basis, breach);
+
+    // Hit-test layout for the crosshair tooltip.
+    canvas.waterfallLayout = {
+        pl, pt, plotW, plotH,
+        bucketKeys, xFor, yFor, yForDisplay, yTop,
+        seriesMap,
+        visibleTypes,
+        metrics,
+        scale,
+        basis,
+        valueAt: (type, ts) => valueForRow(seriesMap[type] && seriesMap[type][ts]),
+        countAt: (type, ts) => ((seriesMap[type] && seriesMap[type][ts] && seriesMap[type][ts].count) || 0)
+    };
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -679,38 +1396,69 @@ document.addEventListener('DOMContentLoaded', function() {
     
     if (canvas && tooltip) {
         canvas.addEventListener('mousemove', (e) => {
-            if (!canvas.waterfallLayout) return;
+            const L = canvas.waterfallLayout;
+            if (!L) return;
             const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
             
-            let hit = null;
-            for (const r of canvas.waterfallLayout.rects) {
-                if (mouseX >= r.x && mouseX <= r.x + r.w &&
-                    mouseY >= r.y && mouseY <= r.y + r.h) {
-                    hit = r.data;
-                    break;
-                }
+            // Snap to nearest time bucket; show a vertical hairline + per-line values.
+            if (mx < L.pl || mx > L.pl + L.plotW || my < L.pt || my > L.pt + L.plotH) {
+                tooltip.style.display = 'none';
+                drawWaterfall();
+                return;
+            }
+            const frac = (mx - L.pl) / L.plotW;
+            let idx = Math.round(frac * (L.bucketKeys.length - 1));
+            idx = Math.max(0, Math.min(L.bucketKeys.length - 1, idx));
+            const ts = L.bucketKeys[idx];
+            
+            if (canvas._hairlineIdx !== idx) {
+                drawWaterfall();
+                canvas._hairlineIdx = idx;
+                const ctx = canvas.getContext('2d');
+                const hx = L.xFor(idx);
+                ctx.strokeStyle = '#44f498';
+                ctx.setLineDash([4, 3]);
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(hx, L.pt); ctx.lineTo(hx, L.pt + L.plotH); ctx.stroke();
+                ctx.setLineDash([]);
+                L.visibleTypes.forEach(type => {
+                    const st = traceStyleFor(type);
+                    const y = L.yForDisplay(L.valueAt(type, ts));
+                    ctx.fillStyle = st.color;
+                    ctx.beginPath(); ctx.arc(hx, y, 3, 0, Math.PI * 2); ctx.fill();
+                    ctx.strokeStyle = '#0c0f0e'; ctx.lineWidth = 1; ctx.stroke();
+                });
             }
             
-            if (hit && hit.count > 0) {
-                document.getElementById('wf-tt-type').textContent = hit.attack_type;
-                document.getElementById('wf-tt-time').textContent = hit.timestamp.substring(11, 19) + ' UTC';
-                document.getElementById('wf-tt-count').textContent = `${hit.count} ALERTS`;
-                document.getElementById('wf-tt-conn').textContent = `${hit.connections} TOTAL CONNECTIONS`;
+            // Tooltip: top 4 attack types at this bucket by the plotted magnitude.
+            const rows = L.visibleTypes
+                .map(type => ({ type, value: L.valueAt(type, ts), count: L.countAt(type, ts) }))
+                .filter(r => r.value > 0)
+                .sort((a, b) => b.value - a.value)
+                .slice(0, 4);
+            const alertsHere = L.visibleTypes.reduce((s, type) => s + L.countAt(type, ts), 0);
+            if (rows.length > 0) {
+                document.getElementById('wf-tt-type').textContent = ts.length >= 16 ? ts.substring(11, 19) + ' UTC' : ts;
+                document.getElementById('wf-tt-time').textContent = `${rows.length} ACTIVE TYPES / ${alertsHere} ALERT(S)`;
+                document.getElementById('wf-tt-count').textContent = rows.map(r => `${r.type}: ${fmtValue(r.value, L.scale)} ${L.scale.unit}`).join(' | ');
+                document.getElementById('wf-tt-conn').textContent = `T-${(L.bucketKeys.length - 1 - idx)} MIN · ${L.basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'}`;
                 
-                tooltip.style.left = `${e.clientX + 15}px`;
-                tooltip.style.top = `${e.clientY + 15}px`;
+                const tipX = mx + 15 + 170 > rect.width ? mx - 180 : mx + 15;
+                tooltip.style.left = `${tipX}px`;
+                tooltip.style.top = `${my + 15}px`;
                 tooltip.style.display = 'flex';
                 canvas.style.cursor = 'crosshair';
             } else {
                 tooltip.style.display = 'none';
-                canvas.style.cursor = 'default';
             }
         });
         
         canvas.addEventListener('mouseleave', () => {
             tooltip.style.display = 'none';
+            canvas._hairlineIdx = null;
+            drawWaterfall();
         });
         
         window.addEventListener('resize', () => {
@@ -719,6 +1467,15 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+
+    // Live ⇄ simulated overlay toggle (see the mode note in index.html).
+    const modeBtn = document.getElementById('btn-wf-mode');
+    if (modeBtn) {
+        modeBtn.addEventListener('click', () => {
+            setSpectralMode(spectralMode === 'simulated' ? 'live' : 'simulated');
+        });
+    }
+    applySpectralModeUI();
     
     // Hook into global refresh interval
     setInterval(updateSpectralWaterfall, 5000);

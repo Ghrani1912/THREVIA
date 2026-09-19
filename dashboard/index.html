@@ -300,30 +300,53 @@
 </div>
 <!-- /VIEW: NETWORK TOPOLOGY -->
 
-<!-- ═══ VIEW: SPECTRAL WATERFALL ═══ -->
+<!-- ═══ VIEW: SPECTRAL WATERFALL → MULTI-LINE TIME-SERIES OVERLAY ═══ -->
 <div class="flex flex-col gap-space-xs w-full" id="spectral-section" style="display:none">
-<div class="w-full h-[560px] bg-surface-container-lowest border border-outline-variant/30 flex flex-col relative overflow-hidden p-space-sm" id="waterfall-container">
-    <div class="flex items-center justify-between border-b border-outline-variant/30 pb-space-xs mb-space-sm">
-        <span class="font-label-md text-label-md text-on-surface-variant uppercase font-bold text-primary">[SPECTRAL WATERFALL] THREAT DENSITY MAP</span>
-        <span class="font-label-sm text-label-sm text-secondary animate-pulse">LIVE FEED</span>
-    </div>
-    
-    <!-- Legend -->
-    <div class="flex items-center gap-space-md mb-space-sm font-label-sm text-label-sm border border-outline-variant/20 bg-surface-container-low px-space-sm py-space-xs w-fit">
-        <span class="text-on-surface-variant">INTENSITY:</span>
-        <div class="flex items-center gap-1">
-            <span class="w-3 h-3 bg-[#0c0f0e] border border-outline-variant/30"></span><span class="text-on-surface-variant text-[10px]">0</span>
-            <span class="w-3 h-3 bg-[#44f49840]"></span><span class="text-on-surface-variant text-[10px]">LOW</span>
-            <span class="w-3 h-3 bg-[#ff9e1b80]"></span><span class="text-on-surface-variant text-[10px]">MED</span>
-            <span class="w-3 h-3 bg-[#ffb4ab]"></span><span class="text-on-surface-variant text-[10px]">HIGH</span>
+<div class="w-full h-[660px] bg-surface-container-lowest border border-outline-variant/30 flex flex-col relative overflow-hidden p-space-sm" id="waterfall-container">
+    <div class="flex flex-wrap items-center justify-between gap-space-xs border-b border-outline-variant/30 pb-space-xs mb-space-sm">
+        <div class="flex flex-wrap items-baseline gap-space-xs min-w-0">
+            <span class="font-label-md text-label-md uppercase font-bold text-primary">[SPECTRAL TELEMETRY] MULTI-LINE TIME-SERIES OVERLAY // ALERT VOLUME BY ATTACK TYPE</span>
+            <span class="font-label-sm text-label-sm text-on-surface-variant" id="wf-mode-caption">// ESCALATED ALERTS (POST-THRESHOLD)</span>
+        </div>
+        <div class="flex items-center gap-space-xs">
+            <span class="font-label-sm text-label-sm text-secondary animate-pulse" id="wf-feed-badge">LIVE FEED</span>
+            <button class="px-space-sm py-space-xs border border-outline-variant hover:border-primary bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-primary font-label-sm text-label-sm uppercase font-bold transition-colors flex items-center gap-space-xs" id="btn-wf-mode" title="Swap the live post-threshold trace for the full pre-gate multi-vector overlay" type="button">
+                <span class="material-symbols-outlined text-[14px]">science</span>
+                <span id="btn-wf-mode-label">SIMULATED VERSION</span>
+            </button>
         </div>
     </div>
 
-    <!-- Heatmap Grid Container -->
+    <!-- Vector trace toggles (one per attack type, click to show/hide a line) -->
+    <div class="flex flex-wrap items-center gap-space-xs mb-space-xs font-label-sm text-label-sm">
+        <span class="text-on-surface-variant uppercase font-bold pr-1">VECTOR TRACES:</span>
+        <div id="wf-trace-toggles" class="flex flex-wrap items-center gap-space-xs"></div>
+    </div>
+
+    <!-- Simulated-mode disclosure (hidden while the live feed is selected) -->
+    <div class="items-center gap-space-xs mb-space-xs px-space-xs py-space-xs border border-primary-container/40 bg-primary-container/10 font-label-sm text-label-sm text-primary-container" id="wf-mode-note" style="display:none">
+        <span class="material-symbols-outlined text-[14px]">info</span>
+        <span>SIMULATED VIEW &mdash; every pre-gate ML verdict, grouped into attack families. The live overlay only carries the vectors that clear the deployed threshold, which on this corpus is DDoS alone. Indicative shape, not escalated alerts.</span>
+    </div>
+
+    <!-- Chart area -->
     <div class="flex-1 w-full relative overflow-hidden flex flex-col">
         <div id="waterfall-grid" class="flex-1 w-full h-full relative">
             <canvas id="waterfallCanvas" class="absolute left-0 top-0 cursor-crosshair"></canvas>
         </div>
+    </div>
+
+    <!-- Spectrogram scale. Kept off the canvas so it can never sit on the live-edge
+         value labels. The range shown is measured from the plotted series; the
+         magnitudes are relative to its strongest bin, not absolute dBm. -->
+    <div class="w-full flex flex-wrap items-center gap-space-xs px-space-xs pt-space-xs font-label-sm text-[9px] text-on-surface-variant" id="wf-spectro-legend" style="display:none">
+        <span class="text-primary font-bold uppercase">SPECTROGRAM BACKGROUND TRACE</span>
+        <span class="flex items-center gap-space-xs">
+            <span id="wf-spectro-min">-- dB</span>
+            <span class="inline-block w-24 h-2 border border-outline-variant/40" id="wf-spectro-ramp"></span>
+            <span id="wf-spectro-max">0 dB</span>
+        </span>
+        <span id="wf-spectro-basis" class="text-on-surface-variant/70">STFT OF DISPLAYED SERIES &middot; RELATIVE ENERGY</span>
     </div>
     
     <!-- Tooltip -->
@@ -332,6 +355,35 @@
         <span class="text-on-surface-variant" id="wf-tt-time">TIME</span>
         <span class="text-error font-semibold" id="wf-tt-count">0 ALERTS</span>
         <span class="text-secondary" id="wf-tt-conn">0 CONNECTIONS</span>
+    </div>
+</div>
+
+<!-- Temporal correlation inspection. Deliberately below the plot rather than overlaying it,
+     so the traces keep the full canvas. Every figure is computed in app.js from the series
+     actually drawn (computeSpectralMetrics): peak, overshoot over the vector's own median,
+     Pearson correlation and cross-correlation lag against the dominant vector, plus a
+     heuristic shape label. The only constants are the deployed gate and the measured ML
+     recalls, both read from backend/realtime/thresholds.json. -->
+<div class="w-full bg-[#0c0f0e]/90 border border-outline-variant/40 p-space-xs flex flex-col gap-space-xs" id="wf-corr-panel">
+    <div class="flex flex-wrap items-center justify-between gap-space-xs border-b border-outline-variant/30 pb-space-xs">
+        <div class="flex flex-wrap items-center gap-space-xs font-label-sm text-label-sm">
+            <span class="material-symbols-outlined text-primary text-[14px]">insights</span>
+            <span class="text-primary font-bold uppercase tracking-wider">[TEMPORAL CORRELATION INSPECTION]</span>
+            <span class="text-on-surface-variant" id="wf-corr-window">[T-- | -- BUCKET]</span>
+            <span class="text-on-surface-variant" id="wf-corr-basis">BASIS: --</span>
+            <span class="text-on-surface-variant" id="wf-corr-gate">GATE: --</span>
+        </div>
+        <div class="flex items-center gap-space-xs font-label-sm text-label-sm">
+            <span class="px-space-xs py-0.5 border border-outline-variant/50 bg-surface-container text-on-surface-variant font-bold" id="wf-corr-breach">BREACH LOCK: --</span>
+            <span class="px-space-xs py-0.5 border border-outline-variant/50 bg-surface-container text-on-surface-variant font-bold" id="wf-corr-suppress">SUPPRESS: --</span>
+        </div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-x-space-md gap-y-space-xs font-label-sm text-label-sm" id="wf-corr-rows">
+        <span class="text-on-surface-variant">AWAITING SERIES DATA</span>
+    </div>
+    <div class="flex items-start gap-space-xs border border-secondary/40 bg-secondary/5 px-space-xs py-space-xs font-label-sm text-label-sm" id="wf-corr-conclusion-box">
+        <span class="material-symbols-outlined text-secondary text-[14px]">rule</span>
+        <span class="text-secondary font-bold uppercase leading-tight" id="wf-corr-conclusion">ANALYST CONCLUSION (HEURISTIC): --</span>
     </div>
 </div>
 </div>
@@ -611,7 +663,7 @@ Connecting to live stream...
 </div></main><footer class="w-full bg-surface-container-lowest border-t border-outline-variant/30 py-space-md"><div class="w-full px-margin flex flex-col md:flex-row items-center justify-between gap-space-sm font-label-sm text-label-sm text-on-surface-variant"><div><span>TACTICAL PROTOCOL: DEFCON-4 // THREVIA DEFENSE MATRIX // STRICT CLASSIFIED WORKSPACE</span></div><div class="flex items-center gap-space-lg"><span id="sys-epoch">SYS-EPOCH: --</span><span>PACKET-DROP: 0.00018%</span><span class="text-primary">STATION RESTRICTED</span></div></div></footer>
 
 <!-- Load app.js -->
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=14"></script>
 <!-- Phase 5 network topology engine (attacker-centred subgraph view) -->
 <script src="/static/graph.js?v=2"></script>
 

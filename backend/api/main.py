@@ -414,38 +414,146 @@ async def get_timeline_data(hours: int = 24):
         return {"error": str(e)}
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Raw multiclass verdicts are finer-grained than the spectral overlay's traces,
+# so they roll up into the CIC-2017 attack families the view draws one line per:
+# the four DoS variants are one DoS vector, and the Patators plus the Web-Attack
+# brute force are one Brute Force vector.
+ATTACK_FAMILY_MAP = {
+    "DoS Hulk": "DoS",
+    "DoS GoldenEye": "DoS",
+    "DoS Slowhttptest": "DoS",
+    "DoS slowloris": "DoS",
+    "SSH-Patator": "Brute Force",
+    "FTP-Patator": "Brute Force",
+    "Web Attack - Brute Force": "Brute Force",
+    "Web Attack": "Brute Force",
+    "Web Attack - XSS": "XSS",
+    "Web Attack - Sql Injection": "Sql Injection",
+    "Botnet": "Bot",
+}
+
+
+def _attack_family(raw_label):
+    raw = (raw_label or "").strip()
+    if not raw:
+        return "Unknown"
+    return ATTACK_FAMILY_MAP.get(raw, raw)
+
+
+# The deployed operating point travels with the gate model, and the same
+# artifact is what the runtime policy loads (backend/realtime/detection_policy.py).
+# Read it rather than restating the cut, so the dashboard cannot drift from the
+# model that is actually scoring traffic.
+THRESHOLDS_PATH = os.getenv(
+    "THRESHOLDS_PATH",
+    os.path.join(_ROOT_DIR, "backend", "realtime", "thresholds.json"),
+)
+
+# Windowed spike gate for stream_alerts -- mirrors the default in
+# backend/realtime/streaming_detector.py (SPIKE_THRESHOLD).
+SPIKE_THRESHOLD = int(os.getenv("SPIKE_THRESHOLD", "50"))
+
+
+def _deployed_gate():
+    """The measured thresholds behind this view, with their provenance."""
+    gate = {
+        "spike_threshold_conn_per_window": SPIKE_THRESHOLD,
+        "source": os.path.relpath(THRESHOLDS_PATH, _ROOT_DIR).replace("\\", "/"),
+    }
+    try:
+        with open(THRESHOLDS_PATH, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+    except Exception as exc:
+        gate["error"] = str(exc)
+        return gate
+
+    thresholds = artifact.get("thresholds", {})
+    gate.update({
+        "attack_threshold": thresholds.get("attack_threshold"),
+        "severity_band": {
+            "medium": thresholds.get("severity_medium"),
+            "high": thresholds.get("severity_high"),
+            "critical": thresholds.get("severity_critical"),
+        },
+        "measured_recall_pct": artifact.get("measured_recall_pct"),
+        "generated_at": artifact.get("generated_at"),
+    })
+    return gate
+
+
 @app.get("/api/v1/analytics/waterfall")
-async def get_waterfall_data(minutes: int = 60):
-    """Get spectral waterfall data (stream alerts over time)"""
+async def get_waterfall_data(minutes: int = 60, mode: str = "live"):
+    """Alert volume over time, bucketed per minute and split by attack type.
+
+    ``mode=live`` (default) aggregates ``stream_alerts`` -- the alerts the
+    deployed policy actually escalated.  The operating cut is calibrated so that
+    only DDoS clears it on this corpus, which is why the live overlay renders a
+    single vector.
+
+    ``mode=simulated`` aggregates ``ml_alerts`` instead: every raw ML verdict,
+    *before* alert aggregation and the threshold gate.  That is the full
+    multi-vector overlay this view was built to draw, labelled "simulated"
+    because it is the detector's pre-gate output rather than escalated alerts.
+    """
     try:
         from datetime import timedelta
+        simulated = mode == "simulated"
+        collection = db.ml_alerts if simulated else db.stream_alerts
+        type_field = "$attack_type" if simulated else "$attack_label"
+        flow_field = "$flow_count" if simulated else "$connection_count"
+
         start_time = datetime.utcnow() - timedelta(minutes=minutes)
-        
+
+        # Fallback to the latest available data window if no recent data exists
+        latest_record = collection.find_one(sort=[("created_at", -1)])
+        if latest_record and latest_record.get("created_at") and latest_record["created_at"] < start_time:
+            start_time = latest_record["created_at"] - timedelta(minutes=minutes)
+
         pipeline = [
             {"$match": {"created_at": {"$gte": start_time}}},
             {"$group": {
                 "_id": {
                     "minute": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:00", "date": "$created_at"}},
-                    "attack_type": "$attack_label"
+                    "attack_type": type_field
                 },
                 "count": {"$sum": 1},
-                "connections": {"$sum": "$connection_count"}
+                "connections": {"$sum": flow_field},
+                # total_bytes exists only on stream_alerts, so the byte basis for
+                # a bandwidth axis is a live-mode quantity.  ml_alerts carries no
+                # byte or packet fields at all, which is why the simulated overlay
+                # falls back to flow counts.
+                "bytes": {"$sum": "$total_bytes"},
             }},
             {"$sort": {"_id.minute": 1}}
         ]
-        
-        result = list(db.stream_alerts.aggregate(pipeline))
-        
+
+        result = list(collection.aggregate(pipeline))
+
+        # Collapse the fine-grained raw verdicts onto the families the overlay
+        # draws one trace per, keeping one row per (minute, family).
+        merged: Dict[Any, Dict[str, Any]] = {}
+        for r in result:
+            key = (r["_id"]["minute"], _attack_family(r["_id"].get("attack_type")))
+            row = merged.setdefault(key, {
+                "timestamp": key[0],
+                "attack_type": key[1],
+                "count": 0,
+                "connections": 0,
+                "bytes": 0.0,
+            })
+            row["count"] += r["count"]
+            row["connections"] += r.get("connections") or 0
+            row["bytes"] += r.get("bytes") or 0
+
         return {
-            "waterfall": [
-                {
-                    "timestamp": r["_id"]["minute"],
-                    "attack_type": r["_id"]["attack_type"] or "Unknown",
-                    "count": r["count"],
-                    "connections": r["connections"]
-                }
-                for r in result
-            ]
+            "mode": "simulated" if simulated else "live",
+            "source": "ml_alerts" if simulated else "stream_alerts",
+            "window_minutes": minutes,
+            # Whether the caller can render an ingress-bandwidth axis.  Summed
+            # bytes are a per-minute total, so Gbps = bytes * 8 / 60 / 1e9.
+            "bytes_available": not simulated,
+            "gate": _deployed_gate(),
+            "waterfall": sorted(merged.values(), key=lambda d: (d["timestamp"], d["attack_type"])),
         }
     except Exception as e:
         return {"error": str(e)}
