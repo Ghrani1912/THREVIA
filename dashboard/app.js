@@ -1,5 +1,11 @@
 // THREVIA Dashboard - Real-time data integration
-const API_BASE = 'http://localhost:8000/api/v1';
+// The API serves this dashboard itself (main.py mounts /static and /dashboard),
+// so the backend is on whatever origin served the page. Pinning it to :8000 meant
+// the view could only be opened on the port the server happened to bind; the
+// literal stays as the fallback for a file:// load.
+const API_BASE = (typeof window !== 'undefined' && window.location && /^https?:$/.test(window.location.protocol))
+    ? `${window.location.origin}/api/v1`
+    : 'http://localhost:8000/api/v1';
 
 // Fetch and update metrics
 async function updateMetrics() {
@@ -530,17 +536,60 @@ document.addEventListener('DOMContentLoaded', function() {
 //   1. a short-time Fourier transform of the displayed aggregate, drawn as a
 //      relative-energy spectrogram behind the traces;
 //   2. one trace per attack family on an auto-scaled magnitude axis (real ingress
-//      bandwidth where stream_alerts carries total_bytes, flows/min otherwise);
+//      bandwidth where stream_alerts carries total_bytes, flows per bucket
+//      otherwise), on the uniform sample grid the API declares;
 //   3. a correlation readout — peak, overshoot over the vector's own median,
 //      Pearson correlation and cross-correlation lag against the dominant
 //      vector — plus a breach marker at the peak escalation bucket.
+//
+// The grid is not rebuilt here: simulated runs at 10 s off ml_alerts.first_seen
+// (361 samples per 60-minute window) and live stays at 1 min off stream_alerts,
+// and every label and lag states which of the two is in force.
 //
 // Nothing in the readout is a hardcoded constant: every figure is computed from
 // the series that is drawn, and the two ML recalls come from the deployed
 // thresholds artifact rather than being restated here.
 
 let waterfallData = [];
-let waterfallMeta = { mode: 'live', bytes_available: false, gate: null, window_minutes: 60 };
+let waterfallMeta = {
+    mode: 'live',
+    bytes_available: false,
+    gate: null,
+    window_minutes: 60,
+    // Sample spacing and the full sample grid, as declared by the API. The two
+    // modes do not share a resolution, so nothing below may assume one.
+    bucket_seconds: 60,
+    timestamps: [],
+    samples: 0
+};
+
+// ── Bucket granularity ───────────────────────────────────────────────────────
+// The API declares its own sample spacing because the two modes differ: the
+// simulated overlay is bucketed off ml_alerts.first_seen every 10 s (361 samples
+// across a 60-minute window), while the live feed is a per-minute stream_alerts
+// aggregate (61). Every label, lag and offset below is derived from what actually
+// arrived, so neither mode is ever annotated with the other's resolution.
+
+function bucketSeconds() { return waterfallMeta.bucket_seconds || 60; }
+
+function granularityLabel(seconds) {
+    const s = seconds || bucketSeconds();
+    if (s < 60) return `${s}S`;
+    if (s % 60 === 0) return `${s / 60}M`;
+    return `${Math.floor(s / 60)}M${s % 60}S`;
+}
+
+// Clock face for an axis tick or a readout. A sub-minute grid keeps the seconds,
+// or six adjacent 10 s samples would all print the same "HH:MM".
+function bucketTimeLabel(ts) {
+    if (!ts || ts.length < 16) return ts || '--';
+    return (bucketSeconds() < 60 && ts.length >= 19) ? ts.substring(11, 19) : ts.substring(11, 16);
+}
+
+// A distance expressed in buckets, resolved to the granularity in force.
+function bucketOffsetLabel(bucketCount) {
+    return granularityLabel(Math.abs(bucketCount) * bucketSeconds());
+}
 
 // paddingRight leaves room for the live-edge value labels, paddingLeft for the
 // magnitude ticks.
@@ -551,9 +600,16 @@ const waterfallConfig = {
     paddingBottom: 44
 };
 
-// STFT window in buckets. 16 keeps the naive DFT trivial; floorDb sets the bottom
-// of the colour ramp (relative to the strongest bin of the displayed series).
-const SPECTRO = { window: 16, alpha: 0.38, minRangeDb: 18, floorPercentile: 0.25 };
+// STFT window in *buckets*, so its wall-clock span follows the mode's
+// granularity: 160 s on the 10 s simulated grid, 16 min on the 1 min live grid.
+// 16 keeps the naive DFT trivial; floorDb sets the bottom of the colour ramp
+// (relative to the strongest bin of the displayed series).
+//
+// minRangeDb guarantees the ramp spans at least 18 dB on a flat series; maxRangeDb
+// caps it when the window is almost entirely idle (one live bucket in a 361-sample
+// grid), where the percentile floor lands on numerical noise and would otherwise
+// wash the whole plot out to a single saturated column.
+const SPECTRO = { window: 16, alpha: 0.38, minRangeDb: 18, maxRangeDb: 60, floorPercentile: 0.25 };
 
 // Measured detector recall, keyed by the hold-out the deployed cut was calibrated
 // on (thresholds.json -> measured_recall_pct). Families with no measured number
@@ -624,14 +680,16 @@ function applySpectralModeUI() {
     if (note) note.style.display = simulated ? 'flex' : 'none';
 }
 
-// The caption carries both the data source and the magnitude basis, because the
-// two modes are never compared on one silent scale.
+// The caption carries the data source, the magnitude basis *and* the bucket
+// granularity, because the two modes are never compared on one silent scale or
+// on one silent sample rate.
 function spectralCaption(basis) {
     const mode = spectralMode === 'simulated'
         ? '// PRE-GATE ML VERDICTS (ALL VECTORS)'
         : '// ESCALATED ALERTS (POST-THRESHOLD)';
-    if (!basis) return mode;
-    return `${mode} · ${basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'}`;
+    const gran = `${granularityLabel()} BUCKETS`;
+    if (!basis) return `${mode} · ${gran}`;
+    return `${mode} · ${basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'} · ${gran}`;
 }
 
 function setSpectralMode(mode) {
@@ -664,7 +722,11 @@ async function updateSpectralWaterfall() {
                 mode: data.mode || 'live',
                 bytes_available: !!data.bytes_available,
                 gate: data.gate || null,
-                window_minutes: data.window_minutes || 60
+                window_minutes: data.window_minutes || 60,
+                // Spacing is per-mode: 10 s for the pre-gate overlay, 60 s live.
+                bucket_seconds: data.bucket_seconds || 60,
+                timestamps: Array.isArray(data.timestamps) ? data.timestamps : [],
+                samples: data.samples || 0
             };
             drawWaterfall();
         }
@@ -777,27 +839,28 @@ function classifyShape(vals) {
 
 // ── Magnitude basis ──────────────────────────────────────────────────────────
 // stream_alerts rows carry total_bytes, so a genuine ingress-bandwidth axis is
-// available and rows are per-minute totals (bits/s = bytes * 8 / 60).  ml_alerts
-// carries no byte or packet fields, so the simulated overlay is plotted in flows.
-// The unit is always labelled, so the two modes are never silently read off one
-// scale.
+// available and rows are per-bucket totals (bits/s = bytes * 8 / bucket_seconds).
+// ml_alerts carries no byte or packet fields, so the simulated overlay is plotted
+// in flows.  The unit is always labelled -- with the bucket width in it -- so the
+// two modes are never silently read off one scale or one sample rate.
 
 function magnitudeBasis() {
     return waterfallMeta.bytes_available ? 'bandwidth' : 'flows';
 }
 
 function bandScaleFor(peakBytes) {
-    const bps = peakBytes * 8 / 60;
-    if (bps >= 1e9) return { unit: 'Gbps', factor: 8 / 60 / 1e9, digits: 2 };
-    if (bps >= 1e6) return { unit: 'Mbps', factor: 8 / 60 / 1e6, digits: 1 };
-    if (bps >= 1e3) return { unit: 'kbps', factor: 8 / 60 / 1e3, digits: 1 };
-    return { unit: 'bps', factor: 8 / 60, digits: 0 };
+    const perSecond = 8 / bucketSeconds();
+    const bps = peakBytes * perSecond;
+    if (bps >= 1e9) return { unit: 'Gbps', factor: perSecond / 1e9, digits: 2 };
+    if (bps >= 1e6) return { unit: 'Mbps', factor: perSecond / 1e6, digits: 1 };
+    if (bps >= 1e3) return { unit: 'kbps', factor: perSecond / 1e3, digits: 1 };
+    return { unit: 'bps', factor: perSecond, digits: 0 };
 }
 
 function metricScale(basis, peakBytes) {
     return basis === 'bandwidth'
         ? bandScaleFor(peakBytes)
-        : { unit: 'FLOWS/MIN', factor: 1, digits: 0 };
+        : { unit: `FLOWS/${granularityLabel()}`, factor: 1, digits: 0, integer: true };
 }
 
 function valueForRow(row) {
@@ -807,7 +870,7 @@ function valueForRow(row) {
 
 function fmtValue(v, scale) {
     const x = v * scale.factor;
-    if (scale.unit === 'FLOWS/MIN') return Math.round(x).toLocaleString();
+    if (scale.integer) return Math.round(x).toLocaleString();
     if (Math.abs(x) >= 100) return x.toFixed(0);
     if (Math.abs(x) >= 10) return x.toFixed(Math.max(1, scale.digits - 1));
     return x.toFixed(scale.digits);
@@ -875,7 +938,10 @@ function computeSpectrogram(values) {
     // minimum range so a flat series still shows contrast.
     const flat = db.reduce((acc, row) => acc.concat(row), []).sort((a, b) => a - b);
     const pick = p => flat[Math.min(flat.length - 1, Math.max(0, Math.round(p * (flat.length - 1))))];
-    const floorDb = Math.min(pick(SPECTRO.floorPercentile), -SPECTRO.minRangeDb);
+    const floorDb = Math.max(
+        Math.min(pick(SPECTRO.floorPercentile), -SPECTRO.minRangeDb),
+        -SPECTRO.maxRangeDb
+    );
 
     return {
         window: win,
@@ -962,7 +1028,13 @@ function renderSpectroLegend(spec, basis) {
     if (maxEl) maxEl.textContent = '0 dB';
     const basisEl = document.getElementById('wf-spectro-basis');
     if (basisEl) {
-        basisEl.textContent = `STFT ${spec.window}-BUCKET HANN · ${spec.frames} FRAMES · RELATIVE ENERGY${basis === 'flows' ? ' · FLOWS BASIS' : ''}`;
+        // The STFT window is fixed in buckets, so state its wall-clock span too:
+        // 16 buckets is 160 s of the 10 s grid but 16 min of the 1 min grid.
+        const span = spec.window * bucketSeconds();
+        const spanLabel = span < 60
+            ? `${span}s`
+            : (span % 60 === 0 ? `${span / 60}m` : `${Math.floor(span / 60)}m${span % 60}s`);
+        basisEl.textContent = `STFT ${spec.window}-SAMPLE HANN (${spanLabel}) · ${spec.frames} FRAMES OF ${granularityLabel()} BUCKETS${basis === 'flows' ? ' · FLOWS BASIS' : ''}`;
     }
 }
 
@@ -995,7 +1067,9 @@ function computeSpectralMetrics(bucketKeys, seriesMap, types) {
             alerts,
             corr: lag.r,
             lagBuckets: lag.lag,
-            lagSeconds: lag.lag * 60,
+            // A lag is counted in buckets, so its wall-clock width is the mode's
+            // bucket width, not a fixed minute.
+            lagSeconds: lag.lag * bucketSeconds(),
             shape: classifyShape(vals),
             recall: recallKey && recalls[recallKey] != null ? recalls[recallKey] : null,
             recallKey: recallKey || null,
@@ -1015,7 +1089,7 @@ function renderCorrelationPanel(metrics, scale, bucketKeys, basis, breach) {
                 const st = traceStyleFor(m.type);
                 const lagText = m.isDominant
                     ? 'REFERENCE'
-                    : `LAG ${m.lagBuckets > 0 ? '+' : ''}${m.lagBuckets}M (${m.lagSeconds}s)`;
+                    : `LAG ${m.lagBuckets > 0 ? '+' : (m.lagBuckets < 0 ? '-' : '')}${Math.abs(m.lagBuckets)}B (${bucketOffsetLabel(m.lagBuckets)})`;
                 const recallText = m.recall != null
                     ? `ML ${m.recall.toFixed(2)}% RECALL`
                     : (m.suppressed ? `ML SUPPRESSED (${m.suppressed})` : 'ML NOT MEASURED');
@@ -1046,7 +1120,8 @@ function renderCorrelationPanel(metrics, scale, bucketKeys, basis, breach) {
     if (winEl) {
         const first = bucketKeys[0] || '';
         const last = bucketKeys[bucketKeys.length - 1] || '';
-        winEl.textContent = `[${bucketKeys.length} BUCKETS | 1M] ${first ? first.substring(11, 16) : '--'}→${last ? last.substring(11, 16) : '--'}`;
+        winEl.textContent = `[${bucketKeys.length} BUCKETS | ${granularityLabel()}] ${bucketTimeLabel(first)}→${bucketTimeLabel(last)}`;
+        winEl.title = `Sampled every ${granularityLabel()} from ${waterfallMeta.mode === 'simulated' ? 'ml_alerts.first_seen' : 'stream_alerts.created_at'}`;
     }
 
     const gate = waterfallMeta.gate || {};
@@ -1065,7 +1140,7 @@ function renderCorrelationPanel(metrics, scale, bucketKeys, basis, breach) {
         if (breach) {
             // The marker tracks the aggregate of the visible vectors, so say so
             // rather than implying it is any single family's peak.
-            breachEl.textContent = `BREACH LOCK: T-${breach.idxFromEnd}M AGG ${fmtValue(breach.value, scale)} ${scale.unit}`;
+            breachEl.textContent = `BREACH LOCK: T-${bucketOffsetLabel(breach.idxFromEnd)} AGG ${fmtValue(breach.value, scale)} ${scale.unit}`;
             breachEl.className = 'px-space-xs py-0.5 border border-error bg-error-container/20 text-error font-bold';
         } else {
             breachEl.textContent = 'BREACH LOCK: NONE';
@@ -1104,7 +1179,7 @@ function buildConclusion(metrics, scale, breach) {
         .filter(m => Math.abs(m.corr) >= MIN_NARRATIVE_CORR)
         .sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr))[0];
     const domStr = `${dom.type} AT ${fmtValue(dom.peak, scale)} ${scale.unit} (+${dom.surgePct.toFixed(0)}% OVER ITS OWN MEDIAN)`;
-    const tail = breach ? ` BREACH LOCK AT T-${breach.idxFromEnd}M.` : '';
+    const tail = breach ? ` BREACH LOCK AT T-${bucketOffsetLabel(breach.idxFromEnd)}.` : '';
 
     if (lead && lead.lagBuckets > 0) {
         return `ANALYST CONCLUSION (HEURISTIC): ${lead.type} TRAILS THE ${dom.type} SURGE BY ${lead.lagBuckets} BUCKET(S) (${lead.lagSeconds}s) AT r=${lead.corr.toFixed(2)} — CONSISTENT WITH STAGED SECONDARY TRAFFIC INSIDE THE ${dom.type} ENVELOPE. DOMINANT VECTOR: ${domStr}.${tail}`;
@@ -1151,8 +1226,13 @@ function drawWaterfall() {
     const plotW = width - pl - pr;
     const plotH = height - pt - pb;
 
-    // Time axis: use the API's bucket string so every type shares the same X grid.
-    const bucketKeys = [...new Set(waterfallData.map(d => d.timestamp))].sort();
+    // Time axis: the API's declared grid, so every type shares one X grid *and*
+    // the grid stays uniform in time where nothing fired.  Rebuilding it from the
+    // returned rows would silently compress the gaps and hand the STFT a
+    // 60-sample series where the simulated overlay has 361 real samples.
+    const bucketKeys = (waterfallMeta.timestamps && waterfallMeta.timestamps.length)
+        ? waterfallMeta.timestamps
+        : [...new Set(waterfallData.map(d => d.timestamp))].sort();
     if (bucketKeys.length === 0) return;
     const bucketCount = bucketKeys.length;
     const xFor = i => pl + (bucketCount === 1 ? plotW / 2 : (i / (bucketCount - 1)) * plotW);
@@ -1244,7 +1324,7 @@ function drawWaterfall() {
         ctx.strokeStyle = 'rgba(84, 68, 52, 0.18)';
         ctx.beginPath(); ctx.moveTo(x, pt); ctx.lineTo(x, pt + plotH); ctx.stroke();
         ctx.fillStyle = '#dac2ae';
-        ctx.fillText(ts.length >= 16 ? ts.substring(11, 16) : ts, x, pt + plotH + 6);
+        ctx.fillText(bucketTimeLabel(ts), x, pt + plotH + 6);
     });
 
     // Layer 2 — baseline + breach markers on the aggregate
@@ -1321,7 +1401,7 @@ function drawWaterfall() {
     if (breach) {
         const bx = xFor(breach.idx);
         const flip = breach.idx > bucketCount * 0.75;
-        const breachLabel = `BREACH LOCK T-${breach.idxFromEnd}M`;
+        const breachLabel = `BREACH LOCK T-${bucketOffsetLabel(breach.idxFromEnd)}`;
         ctx.font = 'bold 9px JetBrains Mono';
         ctx.textAlign = flip ? 'right' : 'left';
         ctx.textBaseline = 'top';
@@ -1443,7 +1523,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('wf-tt-type').textContent = ts.length >= 16 ? ts.substring(11, 19) + ' UTC' : ts;
                 document.getElementById('wf-tt-time').textContent = `${rows.length} ACTIVE TYPES / ${alertsHere} ALERT(S)`;
                 document.getElementById('wf-tt-count').textContent = rows.map(r => `${r.type}: ${fmtValue(r.value, L.scale)} ${L.scale.unit}`).join(' | ');
-                document.getElementById('wf-tt-conn').textContent = `T-${(L.bucketKeys.length - 1 - idx)} MIN · ${L.basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'}`;
+                document.getElementById('wf-tt-conn').textContent = `T-${bucketOffsetLabel(L.bucketKeys.length - 1 - idx)} · ${L.basis === 'bandwidth' ? 'INGRESS BANDWIDTH' : 'FLOW VOLUME'}`;
                 
                 const tipX = mx + 15 + 170 > rect.width ? mx - 180 : mx + 15;
                 tooltip.style.left = `${tipX}px`;

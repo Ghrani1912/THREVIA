@@ -32,6 +32,19 @@ except ImportError as _exc:  # pragma: no cover - defensive
 else:
     _GRAPH_QUERY_ERROR = None
 
+# Spectral-overlay sample grid. Stdlib-only, so this import cannot fail on the
+# API's dependency set; see backend/api/bucket_grid.py for why the granularity
+# belongs to the source rather than to the caller.
+from backend.api.bucket_grid import (
+    FIRST_SEEN_FORMAT,
+    MODE_SIMULATED,
+    bucket_grid,
+    bucket_iso_format,
+    bucket_labels,
+    bucket_seconds_for,
+    parse_first_seen,
+)
+
 app = FastAPI(title="THREVIA API", version="1.0.0")
 
 # CORS middleware for local development
@@ -483,57 +496,123 @@ def _deployed_gate():
 
 @app.get("/api/v1/analytics/waterfall")
 async def get_waterfall_data(minutes: int = 60, mode: str = "live"):
-    """Alert volume over time, bucketed per minute and split by attack type.
+    """Alert volume over time on a uniform bucket grid, split by attack type.
 
     ``mode=live`` (default) aggregates ``stream_alerts`` -- the alerts the
-    deployed policy actually escalated.  The operating cut is calibrated so that
-    only DDoS clears it on this corpus, which is why the live overlay renders a
-    single vector.
+    deployed policy actually escalated, bucketed per minute by their write time.
+    The operating cut is calibrated so that only DDoS clears it on this corpus,
+    which is why the live overlay renders a single vector.
 
     ``mode=simulated`` aggregates ``ml_alerts`` instead: every raw ML verdict,
     *before* alert aggregation and the threshold gate.  That is the full
     multi-vector overlay this view was built to draw, labelled "simulated"
     because it is the detector's pre-gate output rather than escalated alerts.
+    It is bucketed by ``first_seen`` -- the event time each document describes --
+    at 10-second granularity, because unlike a per-minute stream_alerts window,
+    an ml_alerts document carries a real event clock.  A 60-minute window is then
+    361 samples rather than 61.
+
+    Both modes return the same three things: ``waterfall`` (only the non-empty
+    (bucket, family) rows), ``timestamps`` (the complete uniform grid, including
+    windows nothing fired in) and ``bucket_seconds``.  The dashboard plots on the
+    returned grid, so a trace, a cross-correlation lag and the STFT spectrogram
+    all share one real time base instead of one rebuilt from the sparse rows.
     """
     try:
         from datetime import timedelta
-        simulated = mode == "simulated"
+        simulated = mode == MODE_SIMULATED
+        bucket_seconds = bucket_seconds_for(mode)
+        bucket_iso = bucket_iso_format(bucket_seconds)
         collection = db.ml_alerts if simulated else db.stream_alerts
         type_field = "$attack_type" if simulated else "$attack_label"
         flow_field = "$flow_count" if simulated else "$connection_count"
 
         start_time = datetime.utcnow() - timedelta(minutes=minutes)
 
-        # Fallback to the latest available data window if no recent data exists
-        latest_record = collection.find_one(sort=[("created_at", -1)])
-        if latest_record and latest_record.get("created_at") and latest_record["created_at"] < start_time:
-            start_time = latest_record["created_at"] - timedelta(minutes=minutes)
+        # Fallback to the latest available data window if no recent data exists.
+        # The two modes run on different clocks -- stream_alerts buckets by when
+        # the alert was written, the simulated overlay by the event it describes
+        # -- so each falls back on the field it buckets by.  first_seen is a
+        # fixed-width string, so its maximum is the lexicographic maximum.
+        if simulated:
+            latest = collection.find_one(
+                sort=[("first_seen", DESCENDING)], projection={"first_seen": 1}
+            )
+            latest_event = parse_first_seen((latest or {}).get("first_seen"))
+            if latest_event and latest_event < start_time:
+                start_time = latest_event - timedelta(minutes=minutes)
+        else:
+            latest_record = collection.find_one(sort=[("created_at", -1)])
+            if latest_record and latest_record.get("created_at") and latest_record["created_at"] < start_time:
+                start_time = latest_record["created_at"] - timedelta(minutes=minutes)
 
-        pipeline = [
-            {"$match": {"created_at": {"$gte": start_time}}},
-            {"$group": {
-                "_id": {
-                    "minute": {"$dateToString": {"format": "%Y-%m-%dT%H:%M:00", "date": "$created_at"}},
-                    "attack_type": type_field
-                },
-                "count": {"$sum": 1},
-                "connections": {"$sum": flow_field},
-                # total_bytes exists only on stream_alerts, so the byte basis for
-                # a bandwidth axis is a live-mode quantity.  ml_alerts carries no
-                # byte or packet fields at all, which is why the simulated overlay
-                # falls back to flow counts.
-                "bytes": {"$sum": "$total_bytes"},
-            }},
-            {"$sort": {"_id.minute": 1}}
-        ]
+        # The grid every series is drawn and transformed on: 60 min at 10 s is
+        # 361 samples, at 1 min it is 61.
+        grid = bucket_grid(start_time, minutes, bucket_seconds)
+        timestamps = bucket_labels(grid, bucket_seconds)
+
+        if simulated:
+            # Bucket on first_seen, not created_at: created_at is when the write
+            # landed, and the two can sit hours apart in this corpus.  The range
+            # match stays on the raw string (see bucket_grid.FIRST_SEEN_FORMAT)
+            # so the date conversion only runs on in-window documents, and the
+            # conversion is what lets $dateTrunc cut the 10-second bins.
+            pipeline = [
+                {"$match": {"first_seen": {"$gte": start_time.strftime(FIRST_SEEN_FORMAT)}}},
+                {"$addFields": {"_event_ts": {"$dateFromString": {
+                    "dateString": "$first_seen",
+                    "format": FIRST_SEEN_FORMAT,
+                    "onError": None,
+                    "onNull": None,
+                }}}},
+                # A malformed or absent first_seen yielded null above; it is
+                # excluded here rather than being bucketed at the epoch.
+                {"$match": {"_event_ts": {"$gte": start_time, "$lte": grid[-1]}}},
+                {"$group": {
+                    "_id": {
+                        "bucket": {"$dateToString": {
+                            "format": bucket_iso,
+                            "date": {"$dateTrunc": {
+                                "date": "$_event_ts",
+                                "unit": "second",
+                                "binSize": bucket_seconds,
+                            }},
+                        }},
+                        "attack_type": type_field
+                    },
+                    "count": {"$sum": 1},
+                    "connections": {"$sum": flow_field},
+                    # total_bytes exists only on stream_alerts, so the byte basis
+                    # for a bandwidth axis is a live-mode quantity.  ml_alerts
+                    # carries no byte or packet fields at all, which is why the
+                    # simulated overlay falls back to flow counts.
+                    "bytes": {"$sum": "$total_bytes"},
+                }},
+                {"$sort": {"_id.bucket": 1}}
+            ]
+        else:
+            pipeline = [
+                {"$match": {"created_at": {"$gte": start_time}}},
+                {"$group": {
+                    "_id": {
+                        "minute": {"$dateToString": {"format": bucket_iso, "date": "$created_at"}},
+                        "attack_type": type_field
+                    },
+                    "count": {"$sum": 1},
+                    "connections": {"$sum": flow_field},
+                    "bytes": {"$sum": "$total_bytes"},
+                }},
+                {"$sort": {"_id.minute": 1}}
+            ]
 
         result = list(collection.aggregate(pipeline))
 
         # Collapse the fine-grained raw verdicts onto the families the overlay
-        # draws one trace per, keeping one row per (minute, family).
+        # draws one trace per, keeping one row per (bucket, family).
         merged: Dict[Any, Dict[str, Any]] = {}
         for r in result:
-            key = (r["_id"]["minute"], _attack_family(r["_id"].get("attack_type")))
+            key = (r["_id"]["bucket" if simulated else "minute"],
+                   _attack_family(r["_id"].get("attack_type")))
             row = merged.setdefault(key, {
                 "timestamp": key[0],
                 "attack_type": key[1],
@@ -549,8 +628,17 @@ async def get_waterfall_data(minutes: int = 60, mode: str = "live"):
             "mode": "simulated" if simulated else "live",
             "source": "ml_alerts" if simulated else "stream_alerts",
             "window_minutes": minutes,
+            # Sample spacing and the full sample grid.  The simulated overlay is
+            # resolved at 10 s off ml_alerts.first_seen; the live feed is a
+            # per-minute aggregate and stays at 60 s.  Both are labelled as such
+            # by the dashboard, and neither is ever resampled to the other's rate.
+            "bucket_seconds": bucket_seconds,
+            "samples": len(timestamps),
+            "timestamps": timestamps,
+            "bucket_time_field": "first_seen" if simulated else "created_at",
             # Whether the caller can render an ingress-bandwidth axis.  Summed
-            # bytes are a per-minute total, so Gbps = bytes * 8 / 60 / 1e9.
+            # bytes are a per-bucket total, so Gbps = bytes * 8 / bucket_seconds
+            # / 1e9.
             "bytes_available": not simulated,
             "gate": _deployed_gate(),
             "waterfall": sorted(merged.values(), key=lambda d: (d["timestamp"], d["attack_type"])),

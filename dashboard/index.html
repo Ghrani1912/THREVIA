@@ -310,7 +310,7 @@
         </div>
         <div class="flex items-center gap-space-xs">
             <span class="font-label-sm text-label-sm text-secondary animate-pulse" id="wf-feed-badge">LIVE FEED</span>
-            <button class="px-space-sm py-space-xs border border-outline-variant hover:border-primary bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-primary font-label-sm text-label-sm uppercase font-bold transition-colors flex items-center gap-space-xs" id="btn-wf-mode" title="Swap the live post-threshold trace for the full pre-gate multi-vector overlay" type="button">
+            <button class="px-space-sm py-space-xs border border-outline-variant hover:border-primary bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-primary font-label-sm text-label-sm uppercase font-bold transition-colors flex items-center gap-space-xs" id="btn-wf-mode" title="Swap the live post-threshold trace (1-minute buckets) for the full pre-gate multi-vector overlay (10-second buckets)" type="button">
                 <span class="material-symbols-outlined text-[14px]">science</span>
                 <span id="btn-wf-mode-label">SIMULATED VERSION</span>
             </button>
@@ -326,7 +326,7 @@
     <!-- Simulated-mode disclosure (hidden while the live feed is selected) -->
     <div class="items-center gap-space-xs mb-space-xs px-space-xs py-space-xs border border-primary-container/40 bg-primary-container/10 font-label-sm text-label-sm text-primary-container" id="wf-mode-note" style="display:none">
         <span class="material-symbols-outlined text-[14px]">info</span>
-        <span>SIMULATED VIEW &mdash; every pre-gate ML verdict, grouped into attack families. The live overlay only carries the vectors that clear the deployed threshold, which on this corpus is DDoS alone. Indicative shape, not escalated alerts.</span>
+        <span>SIMULATED VIEW &mdash; every pre-gate ML verdict, grouped into attack families and bucketed every 10 s off <span class="font-mono">ml_alerts.first_seen</span>, so a 60-minute window is 361 real samples rather than 61. The live overlay stays on its native per-minute <span class="font-mono">stream_alerts</span> grid and only carries the vectors that clear the deployed threshold, which on this corpus is DDoS alone. Indicative shape, not escalated alerts.</span>
     </div>
 
     <!-- Chart area -->
