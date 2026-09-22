@@ -16,11 +16,12 @@ and runs three detection pipelines:
                             Alerts are written per flow above the policy
                             threshold.
 
-Severity mapping (connections per window):
-  ≥ 500   → Critical
-  ≥ 200   → High
-  ≥  50   → Medium
-  (below threshold — no alert)
+Severity mapping (connections per window) — see
+``detection_policy.spike_severity_for``, which owns this ladder:
+  ≥ 500   → Critical   (SPIKE_CRITICAL_CONNECTIONS)
+  ≥ 200   → High       (SPIKE_HIGH_CONNECTIONS)
+  ≥  50   → Medium     (SPIKE_THRESHOLD — the gate *below* this, no alert is
+                        emitted at all, so Medium is the ladder's floor)
 
 Pipeline C decision policy
 --------------------------
@@ -96,9 +97,12 @@ from pyspark.ml.functions import vector_to_array
 from backend.realtime.bloom_filter import ThreatBloomFilter
 from backend.realtime.alert_writer import AlertWriter
 from backend.realtime.detection_policy import (
+    SPIKE_CRITICAL_CONNECTIONS,
+    SPIKE_HIGH_CONNECTIONS,
     Thresholds,
     classify_flow,
     load_thresholds,
+    spike_severity_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,11 +178,13 @@ _SCHEMA = StructType([
 
 
 def _severity(count: int) -> str:
-    if count >= 500:
-        return "Critical"
-    if count >= 200:
-        return "High"
-    return "Medium"
+    """Grade a windowed connection count.
+
+    Delegates to ``detection_policy.spike_severity_for`` so the dashboard legend
+    and the detector cannot disagree about where the spike bands sit; the
+    cutoffs used to be inlined here, which is exactly how they drifted.
+    """
+    return spike_severity_for(count)
 
 
 # ── Bloom foreachBatch handler ─────────────────────────────────────────────────

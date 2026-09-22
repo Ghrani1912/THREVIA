@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 import asyncio
 import os
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import sys
 
 # Ensure the project root is importable when this file is launched directly
@@ -31,6 +31,24 @@ except ImportError as _exc:  # pragma: no cover - defensive
     _GRAPH_QUERY_ERROR = str(_exc)
 else:
     _GRAPH_QUERY_ERROR = None
+
+# Severity ladders, read rather than restated. detection_policy is stdlib-only
+# (the Spark detector imports it from the same module), so the API shares the
+# detector's definition of where a band starts instead of hardcoding a second
+# copy of it in the legend payload.
+try:
+    from backend.realtime.detection_policy import (
+        SPIKE_CRITICAL_CONNECTIONS,
+        SPIKE_HIGH_CONNECTIONS,
+        load_thresholds,
+    )
+except ImportError as _exc:  # pragma: no cover - defensive
+    SPIKE_CRITICAL_CONNECTIONS = None
+    SPIKE_HIGH_CONNECTIONS = None
+    load_thresholds = None
+    _POLICY_IMPORT_ERROR = str(_exc)
+else:
+    _POLICY_IMPORT_ERROR = None
 
 # Spectral-overlay sample grid. Stdlib-only, so this import cannot fail on the
 # API's dependency set; see backend/api/bucket_grid.py for why the granularity
@@ -216,9 +234,83 @@ async def get_summary_metrics():
     except Exception as e:
         return {"error": str(e)}
 
+# Radar sample window. The detector writes ~55 ml_alerts every 10 s and every
+# document in a burst shares one created_at, so "the newest N documents" is a
+# ten-second snapshot of a single micro-batch, not a picture of the last N
+# minutes.  Five minutes covers ~30 bursts.
+RADAR_WINDOW_MINUTES = float(os.getenv("RADAR_WINDOW_MINUTES", "5"))
+
+# Severity bands, worst first. A radar is an alerting surface, so the scope is
+# meant to fill from the top of this list: a batch's worth of Medium noise must
+# not be able to crowd Critical contacts off the display.
+RADAR_SEVERITY_ORDER = ("Critical", "High", "Medium")
+
+# created_at ties are broken by src_ip so the same window yields the same
+# contacts on every request. Without a secondary key the winner among tied
+# documents is decided by index scan direction, which is not a decision anyone
+# made -- see _radar_sample.
+_RADAR_SORT = [("created_at", DESCENDING), ("src_ip", 1)]
+
+
+def _radar_sample(collection, limit: int, window_minutes, bands=None, projection=None):
+    """Newest ``limit`` documents inside ``window_minutes``, optionally per band.
+
+    ``find().sort("created_at", -1).limit(n)`` reads like "the newest n", but
+    every document in a micro-batch shares a timestamp, and among documents that
+    compare equal the order is whatever the plan happens to produce.  Measured on
+    this stack: a descending ``created_at`` index scan returns tied documents in
+    *reverse insertion* order, and the alert writer inserts each batch grouped by
+    ``(src_ip, attack_type, severity)`` with the Critical/DDoS groups first.  So
+    "the newest n" was the batch's Medium *tail* (Web Attack, Bot, SSH-Patator),
+    and the radar drew a near-total absence of Critical contacts while ~40% of
+    every batch was Critical.
+
+    Passing ``bands`` samples each band separately, which makes the composition
+    of the result a property of this function instead of of tie order.  Returns
+    ``(docs, window_minutes_used)``; a window that comes back empty is retried
+    without one, because a stopped pipeline is not the same thing as no alerts
+    and a scope that empties itself reads as "nothing is happening".
+    """
+    if projection is None:
+        projection = {"_id": 0}
+
+    def fetch(since):
+        if not bands:
+            query = {"created_at": {"$gte": since}} if since else {}
+            return list(collection.find(query, projection).sort(_RADAR_SORT).limit(limit))
+        per_band = max(limit // len(bands), 1)
+        docs = []
+        for band in bands:
+            query = {"severity": band}
+            if since:
+                query["created_at"] = {"$gte": since}
+            docs.extend(
+                collection.find(query, projection).sort(_RADAR_SORT).limit(per_band)
+            )
+        return docs
+
+    if window_minutes:
+        since = datetime.utcnow() - timedelta(minutes=float(window_minutes))
+        docs = fetch(since)
+        if docs:
+            return docs, window_minutes
+    return fetch(None), None
+
+
 @app.get("/api/v1/threats/recent")
 async def get_recent_threats(limit: int = 100):
-    """Get recent threat events from streaming pipeline"""
+    """Get recent threat events from streaming pipeline.
+
+    ``gate`` ships with the feed because the radar's legend is drawn from the same
+    contacts these documents produce: a legend of severity bands is a claim about
+    *how this feed was graded*, and it has to arrive with the feed to stay true.
+
+    The attack feeds are sampled per severity band out of ``RADAR_WINDOW_MINUTES``
+    rather than by "newest n documents"; ``window_minutes`` in the response says
+    which window was used (``None`` = the pipeline is idle and the newest stored
+    contacts were returned instead).  See ``_radar_sample`` for why the obvious
+    query is not a sample at all.
+    """
     try:
         # Per-collection quotas: ml_alerts arrive in ~100-doc bursts, so an
         # unbalanced fetch lets one burst evict every other class from the
@@ -226,25 +318,16 @@ async def get_recent_threats(limit: int = 100):
         # Fetch a sample of nominal (benign) traffic so the radar can render
         # baseline flows, not just alerts.
         n_nominal = max(limit // 3, 10)
-        nominal = list(db.nominal_flows.aggregate([
-            {"$sort": {"created_at": -1}},
-            {"$limit": n_nominal},
-            {"$project": {"_id": 0}},
-        ])) if "nominal_flows" in db.list_collection_names() else []
         n_spike = max((limit - n_nominal) // 4, 5)
-        spike_alerts = list(db.stream_alerts.find(
-            {},
-            {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(n_spike))
-        bloom_hits = list(db.bloom_hits.find(
-            {},
-            {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(max(n_spike // 2, 3)))
-        n_ml = max(limit - n_nominal - n_spike - len(bloom_hits), 1)
-        ml_alerts = list(db.ml_alerts.find(
-            {},
-            {"_id": 0}
-        ).sort("created_at", DESCENDING).limit(n_ml))
+        bloom_limit = max(n_spike // 2, 3)
+        n_ml = max(limit - n_nominal - n_spike - bloom_limit, 1)
+
+        ml_alerts, window_minutes = _radar_sample(
+            db.ml_alerts, n_ml, RADAR_WINDOW_MINUTES, bands=RADAR_SEVERITY_ORDER)
+        spike_alerts, _ = _radar_sample(
+            db.stream_alerts, n_spike, RADAR_WINDOW_MINUTES, bands=RADAR_SEVERITY_ORDER)
+        bloom_hits, _ = _radar_sample(db.bloom_hits, bloom_limit, RADAR_WINDOW_MINUTES)
+        nominal, _ = _radar_sample(db.nominal_flows, n_nominal, RADAR_WINDOW_MINUTES)
         
         # Combine. Do NOT re-sort by time and slice to `limit` here: ml_alerts
         # are bulk-inserted in ~100-doc bursts sharing one timestamp while
@@ -261,7 +344,12 @@ async def get_recent_threats(limit: int = 100):
         # Stable sort for display ordering only; every doc is returned.
         all_threats.sort(key=_sort_key, reverse=True)
         
-        return {"threats": all_threats, "count": len(all_threats)}
+        return {
+            "threats": all_threats,
+            "count": len(all_threats),
+            "window_minutes": window_minutes,
+            "gate": _deployed_gate(),
+        }
     except Exception as e:
         return {"error": str(e), "threats": []}
 
@@ -467,30 +555,70 @@ THRESHOLDS_PATH = os.getenv(
 SPIKE_THRESHOLD = int(os.getenv("SPIKE_THRESHOLD", "50"))
 
 
+def _rel_thresholds_path() -> str:
+    """Project-relative thresholds path, for display."""
+    try:
+        return os.path.relpath(THRESHOLDS_PATH, _ROOT_DIR).replace("\\", "/")
+    except ValueError:  # pragma: no cover - different drive on Windows
+        return THRESHOLDS_PATH
+
+
 def _deployed_gate():
-    """The measured thresholds behind this view, with their provenance."""
+    """The measured thresholds behind this view, with their provenance.
+
+    Both severity ladders travel together because the dashboard draws one legend
+    for both: ``severity_band`` grades ``P(attack)`` (the ``ml_alerts`` feed,
+    ``detection_policy.severity_for``) and ``spike_severity_band`` grades
+    ``connection_count`` (the ``stream_alerts`` feed,
+    ``detection_policy.spike_severity_for``).  The bands are *loaded*, not
+    restated, so a legend cannot advertise a cut the pipeline does not use.
+
+    ``resolved_from`` is the policy's own provenance string and matters for
+    honesty: ``load_thresholds`` never raises -- an unreadable artifact silently
+    falls back to the module defaults -- so ``resolved_from == "defaults"`` is
+    the only signal that the numbers below are NOT the deployed calibration.
+    """
     gate = {
         "spike_threshold_conn_per_window": SPIKE_THRESHOLD,
-        "source": os.path.relpath(THRESHOLDS_PATH, _ROOT_DIR).replace("\\", "/"),
+        "source": _rel_thresholds_path(),
+        "spike_severity_band": {
+            "high": SPIKE_HIGH_CONNECTIONS,
+            "critical": SPIKE_CRITICAL_CONNECTIONS,
+        },
     }
+    if SPIKE_HIGH_CONNECTIONS is None:
+        # Import failed: say so rather than publishing nulls a legend would
+        # render as "≥0 conn/window" and quietly mislead.
+        gate["spike_severity_band_error"] = _POLICY_IMPORT_ERROR
+
+    if load_thresholds is None:
+        gate["thresholds_error"] = _POLICY_IMPORT_ERROR
+    else:
+        thresholds = load_thresholds(THRESHOLDS_PATH)
+        gate.update({
+            "attack_threshold": thresholds.attack_threshold,
+            "severity_band": {
+                "medium": thresholds.severity_medium,
+                "high": thresholds.severity_high,
+                "critical": thresholds.severity_critical,
+            },
+            "resolved_from": thresholds.source,
+        })
+        if thresholds.source == "defaults":
+            gate["severity_band_warning"] = (
+                f"{_rel_thresholds_path()} unreadable: bands are the policy "
+                "module defaults, not the deployed calibration"
+            )
+
     try:
         with open(THRESHOLDS_PATH, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
     except Exception as exc:
         gate["error"] = str(exc)
-        return gate
-
-    thresholds = artifact.get("thresholds", {})
-    gate.update({
-        "attack_threshold": thresholds.get("attack_threshold"),
-        "severity_band": {
-            "medium": thresholds.get("severity_medium"),
-            "high": thresholds.get("severity_high"),
-            "critical": thresholds.get("severity_critical"),
-        },
-        "measured_recall_pct": artifact.get("measured_recall_pct"),
-        "generated_at": artifact.get("generated_at"),
-    })
+    else:
+        if isinstance(artifact, dict):
+            gate["generated_at"] = artifact.get("generated_at")
+            gate["measured_recall_pct"] = artifact.get("measured_recall_pct")
     return gate
 
 

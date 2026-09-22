@@ -193,7 +193,14 @@ def calibrate_probability(
 
 
 def severity_for(p_attack: float, thresholds: "Thresholds") -> str:
-    """Map P(attack) onto the operational severity ladder."""
+    """Map P(attack) onto the operational severity ladder.
+
+    Note the ladder's bottom rung is ``Low``, but ``Low`` means "scored below
+    ``severity_medium``" and ``severity_medium`` *is* the deployed
+    ``attack_threshold`` -- so a flow that reaches the alert pipeline is never
+    Low.  Nothing in ``ml_alerts`` is labelled Low; the rung exists only so the
+    function is total over its input range.
+    """
     if p_attack >= thresholds.severity_critical:
         return "Critical"
     if p_attack >= thresholds.severity_high:
@@ -201,6 +208,29 @@ def severity_for(p_attack: float, thresholds: "Thresholds") -> str:
     if p_attack >= thresholds.severity_medium:
         return "Medium"
     return "Low"
+
+
+# ── Windowed-spike severity ladder ─────────────────────────────────────────────
+# ``stream_alerts`` grade a *connection count*, not a probability, so they do not
+# run through ``severity_for``.  Their ladder lives here anyway, beside the ML
+# one, because both answer the same question -- "how bad is this contact?" -- and
+# the dashboard renders them as one legend.  Two ladders in two modules is how a
+# legend ends up disagreeing with the detector that fills it.
+#
+# Note the two ladders are disjoint in practice: the spike ladder's Critical rung
+# is far above what the streamed corpus reaches (47k stream_alerts carry zero
+# Critical), so red contacts come from the ML ladder, not this one.
+SPIKE_HIGH_CONNECTIONS = int(os.getenv("SPIKE_HIGH_CONNECTIONS", "200"))
+SPIKE_CRITICAL_CONNECTIONS = int(os.getenv("SPIKE_CRITICAL_CONNECTIONS", "500"))
+
+
+def spike_severity_for(connection_count: int) -> str:
+    """Grade a windowed connection count onto the spike severity ladder."""
+    if connection_count >= SPIKE_CRITICAL_CONNECTIONS:
+        return "Critical"
+    if connection_count >= SPIKE_HIGH_CONNECTIONS:
+        return "High"
+    return "Medium"
 
 
 # ── Threshold container ────────────────────────────────────────────────────────
@@ -457,4 +487,7 @@ __all__ = [
     "severity_for",
     "should_alert",
     "sigmoid",
+    "spike_severity_for",
+    "SPIKE_CRITICAL_CONNECTIONS",
+    "SPIKE_HIGH_CONNECTIONS",
 ]

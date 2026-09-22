@@ -153,6 +153,217 @@ let radarAngle = 0;
 // Shared with the topology view: [SPACE] freezes both the sweep and the graph.
 let radarPaused = false;
 
+// ── Radar severity encoding ───────────────────────────────────────────────────
+// The scope encodes a *severity band*, not an attack family. This object is the
+// single definition of that encoding: drawRadar paints blips from it and
+// renderRadarLegend paints the legend swatches from it, so the key can never say
+// one thing while the scope draws another.
+//
+// The legend this replaces claimed the orange contacts were "ELEVATED
+// (PortScan/SYN Sweep)" and the red "CRITICAL INTRUSION (DDoS/Exfil)". drawRadar
+// never looks at attack_type at all -- those oranges are DDoS/DoS/Bot verdicts
+// that merely scored below the critical cut -- so the labels contradicted the
+// colours they sat next to.
+const RADAR_SEVERITY_COLORS = {
+    Critical: '#ff3344',
+    High:     '#ffaa00',
+    Medium:   '#ff8844',
+    Nominal:  '#88ff88',
+    // A contact with no verdict to band: Bloom-filter hits carry src_ip and a
+    // label but no P(attack). Drawn as red so an untriaged match is never the
+    // quietest thing on the scope.
+    Ungraded: '#ff5555',
+};
+
+// Legend rows, in the order the ladder escalates. `field` names the payload key
+// each band's cut is read from, so a band whose cut cannot be read says so
+// instead of rendering a plausible-looking number.
+const RADAR_BANDS = [
+    { id: 'critical', name: 'CRITICAL', color: RADAR_SEVERITY_COLORS.Critical },
+    { id: 'high',     name: 'HIGH',     color: RADAR_SEVERITY_COLORS.High },
+    { id: 'medium',   name: 'MEDIUM',   color: RADAR_SEVERITY_COLORS.Medium },
+    { id: 'nominal',  name: 'NOMINAL MIRROR FLOW', color: RADAR_SEVERITY_COLORS.Nominal },
+];
+
+// Severity rank, for ordering the scope worst-first. The colour is not enough:
+// High and Medium are both orange to the eye, so "first by colour" would not have
+// put the worst contact in front of the viewer.
+const SEVERITY_RANK = { Critical: 3, High: 2, Medium: 1, Low: 0 };
+
+// The scope's slot budget, and the whole reason it has one.
+//
+// Ranking everything and taking the top six is not a summary of the traffic, it
+// is a summary of the top of one distribution. With 656 Critical contacts in a
+// five-minute window, "the 6 worst" were always Critical -- so the scope lost its
+// yellow and orange entirely, which is the same defect as before (one band
+// painted the whole screen) wearing the opposite colour. A quota keeps the worst
+// contacts while guaranteeing every band is on the scope, because a display that
+// shows one colour is not telling you the mix, it is hiding it.
+const RADAR_SLOT_QUOTA = { Critical: 3, High: 2, Medium: 1 };
+const RADAR_NOMINAL_SLOTS = 2; // green baseline presence per sweep
+const RADAR_ATTACK_SLOTS = 6;
+
+/** Network prefix, for telling one incident from one attacker counted twice. */
+function subnetOf(ip) {
+    const parts = String(ip || '').split('.');
+    return parts.length === 4 ? parts.slice(0, 3).join('.') : String(ip || '');
+}
+
+/**
+ * Choose the contacts the scope draws: quota per band, worst-first inside a band.
+ *
+ * De-duplication runs first and is relaxed only if it cannot fill a band, so the
+ * blips are distinct incidents rather than one attacker drawn three times (the
+ * live Critical band is ~100% DDoS spread over four /24s, so this is the common
+ * case, not a corner case). A candidate is only a repeat when *both* its family
+ * and its subnet are already on the scope: requiring either one to be new would
+ * reject every Critical after the first, because that band is a single family.
+ * Slots left over after the quota go to whatever is worst, which covers a band
+ * with no contacts at all without leaving a hole.
+ */
+function pickRadarContacts(attacks, slots) {
+    const ranked = attacks.slice().sort((a, b) =>
+        (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0)
+        || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+
+    const chosen = [];
+    const families = new Set();
+    const subnets = new Set();
+
+    const take = (band, want, strict) => {
+        let added = 0;
+        for (const threat of ranked) {
+            if (added >= want || chosen.length >= slots) return added;
+            if (band && threat.severity !== band) continue;
+            if (chosen.indexOf(threat) !== -1) continue;
+            const family = threat.attack_type || 'unclassified';
+            const subnet = subnetOf(threat.src_ip);
+            if (strict && families.has(family) && subnets.has(subnet)) continue;
+            chosen.push(threat);
+            families.add(family);
+            subnets.add(subnet);
+            added += 1;
+        }
+        return added;
+    };
+
+    const quota = Object.entries(RADAR_SLOT_QUOTA);
+    for (const [band, want] of quota) take(band, want, true);          // distinct incidents
+    for (const [band, want] of quota) {                                 // top each band up
+        const have = chosen.filter(t => t.severity === band).length;
+        if (have < want) take(band, want - have, false);
+    }
+    if (chosen.length < slots) take(null, slots - chosen.length, false); // spare slots
+    // Top-ups land at the end of `chosen`; re-sort so the array stays worst-first
+    // too. Slots are drawn positionally, so without this the *layout* would still
+    // be ordered while the list it came from was not.
+    return chosen.sort((a, b) =>
+        (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0)
+        || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+}
+
+/**
+ * Resolve a blip's severity band to the colour the scope draws it in.
+ *
+ * The ladder's bottom rung ("Low") has no branch on purpose: Low means "scored
+ * below the medium cut", and the medium cut *is* the deployed alert threshold,
+ * so nothing that reaches this feed is Low. If one ever arrived it would fall
+ * through to Ungraded -- flagged as untriaged rather than silently green.
+ */
+function radarColorFor(blip) {
+    if (blip.observation === 'nominal' || blip.severity === 'Nominal') return RADAR_SEVERITY_COLORS.Nominal;
+    if (blip.severity === 'Critical') return RADAR_SEVERITY_COLORS.Critical;
+    if (blip.severity === 'High')     return RADAR_SEVERITY_COLORS.High;
+    if (blip.severity === 'Medium')   return RADAR_SEVERITY_COLORS.Medium;
+    return RADAR_SEVERITY_COLORS.Ungraded;
+}
+
+const _fmtCut = v => (typeof v === 'number' ? v.toFixed(4) : '--');
+
+/**
+ * State the scope's sampling rule, which is half of what a blip means.
+ *
+ * "Worst-first" is only meaningful next to the window it was drawn from, and
+ * `null` means the API fell back to the newest stored contacts because the
+ * window was empty -- a different claim, so it gets different words.
+ */
+function renderRadarScope(windowMinutes) {
+    const el = document.getElementById('radar-legend-scope');
+    if (!el) return;
+    // The slot rule is built from RADAR_SLOT_QUOTA rather than typed out, so the
+    // legend cannot describe a mix the scope is not drawing.
+    const mix = Object.entries(RADAR_SLOT_QUOTA).map(([band, n]) => `${n} ${band}`).join(' / ');
+    const bands = `bands ${mix}${RADAR_NOMINAL_SLOTS ? ` / ${RADAR_NOMINAL_SLOTS} Nominal` : ''}`;
+    if (typeof windowMinutes === 'number' && windowMinutes > 0) {
+        el.textContent = `${bands} \u00b7 worst first, last ${windowMinutes} min`;
+        return;
+    }
+    // null is the API saying "the window was empty, I fell back"; anything else is
+    // a response that carried no window at all. Different claims about the
+    // sample, so different words.
+    el.textContent = windowMinutes === null
+        ? `${bands} \u00b7 window empty, newest stored contacts`
+        : `${bands} \u00b7 sample window unread`;
+}
+
+/**
+ * Paint the legend from the gate that shipped with the radar's own feed.
+ *
+ * The two ladders are separate and the legend says so, because they grade
+ * different quantities: `severity_band` bands P(attack) from the ML feed, while
+ * `spike_severity_band` bands a connection count from the streamed spike feed.
+ */
+function renderRadarLegend(gate) {
+    // Swatches are painted unconditionally: the colour encoding is a property of
+    // the code, and it stays true even when the cuts cannot be read.
+    RADAR_BANDS.forEach(band => {
+        const swatch = document.getElementById(`radar-swatch-${band.id}`);
+        const name = document.getElementById(`radar-name-${band.id}`);
+        if (swatch) swatch.style.background = band.color;
+        if (name) name.style.color = band.color;
+    });
+
+    const bands = gate && gate.severity_band;
+    const spike = gate && gate.spike_severity_band;
+    const spikeGate = gate && gate.spike_threshold_conn_per_window;
+    const rules = {
+        critical: bands && bands.critical != null
+            ? `P(attack) \u2265 ${_fmtCut(bands.critical)} \u00b7 spike \u2265 ${spike && spike.critical != null ? spike.critical : '--'} conn/win`
+            : 'deployed cut unread',
+        high: bands && bands.high != null
+            ? `P(attack) \u2265 ${_fmtCut(bands.high)} \u00b7 spike \u2265 ${spike && spike.high != null ? spike.high : '--'} conn/win`
+            : 'deployed cut unread',
+        medium: bands && bands.medium != null
+            ? `P(attack) \u2265 ${_fmtCut(bands.medium)} \u00b7 spike ${spikeGate != null ? spikeGate : '--'}\u2013${spike && spike.high != null ? spike.high - 1 : '--'} conn/win`
+            : 'deployed cut unread',
+        nominal: 'nominal_flows mirror \u00b7 benign baseline, never scored',
+    };
+    Object.keys(rules).forEach(id => {
+        const el = document.getElementById(`radar-rule-${id}`);
+        if (el) el.textContent = rules[id];
+    });
+
+    const src = document.getElementById('radar-legend-source');
+    if (!src) return;
+    if (!gate) {
+        src.textContent = 'deployed bands unreadable \u2014 colours only';
+        return;
+    }
+    // Say which artifact and when, and never let a defaults fallback pass as the
+    // deployed calibration: load_thresholds() cannot raise, it can only silently
+    // return the module defaults.
+    const provenance = [gate.source];
+    // The policy appends "+env(VAR)" to its provenance when an environment
+    // variable overrides the artifact. That is the one case where the file above
+    // is *not* what the detector is running, so it is worth a word.
+    if (/\+env\(/.test(String(gate.resolved_from || ''))) provenance.push('env override in effect');
+    if (gate.generated_at) provenance.push(`gen ${String(gate.generated_at).slice(0, 10)}`);
+    src.textContent = `bands: ${provenance.join(' \u00b7 ')}`;
+    if (gate.severity_band_warning || gate.severity_band_error || gate.thresholds_error) {
+        src.textContent += ' \u26a0 NOT DEPLOYED VALUES';
+    }
+}
+
 function setRadarPaused(paused) {
     radarPaused = !!paused;
     return radarPaused;
@@ -167,14 +378,21 @@ async function updateRadarIPs() {
         const response = await fetch(`${API_BASE}/threats/recent?limit=100`);
         const data = await response.json();
         
+        if (data.gate) renderRadarLegend(data.gate);
+        renderRadarScope(data.window_minutes);
+
         if (data.threats) {
             const isNominal = t => t.observation === 'nominal';
             const attacks = data.threats.filter(t => !isNominal(t));
             const nominal = data.threats.filter(isNominal);
-            const NOMINAL_SLOTS = 2; // green baseline presence per sweep
+            // Taking the feed's own order meant taking whichever rows the
+            // database put first, and every row in a micro-batch shares a
+            // timestamp -- so the colour mix was decided by tie order rather than
+            // by what was happening. The quota pick replaces that with a stated
+            // rule; see RADAR_SLOT_QUOTA.
             const picked = [
-                ...attacks.slice(0, 8 - NOMINAL_SLOTS),
-                ...nominal.slice(0, NOMINAL_SLOTS),
+                ...pickRadarContacts(attacks, RADAR_ATTACK_SLOTS),
+                ...nominal.slice(0, RADAR_NOMINAL_SLOTS),
             ];
             radarIPs = picked.map((threat, idx) => ({
                 ip: threat.src_ip || '0.0.0.0',
@@ -247,15 +465,10 @@ function drawRadar() {
         const x = centerX + dist * Math.cos(angle);
         const y = centerY + dist * Math.sin(angle);
         
-        // Color by severity. Nominal (benign) traffic arrives from the
-        // nominal_flows mirror with severity "Nominal" / observation "nominal"
-        // and renders green -- previously impossible, since only alert
-        // collections were queried and alerts are High/Critical by definition.
-        let color = '#ff5555'; // red default for attacks
-        if (blip.severity === 'Critical') color = '#ff3344';
-        else if (blip.severity === 'High') color = '#ffaa00';
-        else if (blip.severity === 'Medium') color = '#ff8844';
-        else if (blip.severity === 'Low' || blip.severity === 'Nominal' || blip.observation === 'nominal') color = '#88ff88';
+        // Colour from the shared encoding; see RADAR_SEVERITY_COLORS /
+        // radarColorFor above for what each band means and why the legend is
+        // painted from the same object.
+        const color = radarColorFor(blip);
         
         // Draw blip
         ctx.fillStyle = color;
@@ -391,6 +604,107 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
+// SOC CONTROLS
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Every button here used to be inert: no handler, no id, nothing to click. What
+// each one is *entitled* to do is limited by what exists behind it, so they are
+// grouped by that rather than fixed uniformly:
+//
+//   * ACTIONS WITH A BACKEND — none of these. killstream, isolate, dispatch,
+//     pcap dump, blackhole and C2-bloom have no API endpoint, no collection and
+//     no state to change. Their fix is an *acknowledgement*, matching the
+//     convention graph.js already uses for the topology equivalents: the label
+//     reports the click for a moment, then reverts. Nothing is sent anywhere and
+//     nothing claims to have been -- if any of these ever gets an endpoint, the
+//     handler belongs there, not here.
+//   * LOCAL UI STATE — the forensic drawer really can be hidden and reopened,
+//     the mute button really can toggle, and escalation really can be a mode.
+//     Those are implemented for real below.
+
+/** Label swap shared by the acknowledgement buttons, via a `data-ack` text. */
+const ACK_MS = 1600;
+
+function acknowledgeButton(btn) {
+    // These buttons carry an icon span before the label, so replacing the
+    // button's own textContent would delete the icon -- and restoring it would
+    // not bring it back. (The topology equivalents get away with that only
+    // because they happen to be text-only buttons.) Swap the label element when
+    // there is one.
+    const label = btn.querySelector('span:last-of-type') || btn;
+    const idle = (btn.dataset.idle || label.textContent).trim();
+    btn.dataset.idle = idle;
+    label.textContent = btn.dataset.ack;
+    clearTimeout(btn._ackTimer);
+    btn._ackTimer = setTimeout(() => { label.textContent = idle; }, ACK_MS);
+}
+
+// The drawer is a real panel, so open/close is real state. updateForensicPanel
+// reopens it, which is what makes the close button safe to press: selecting an
+// incident brings the panel back.
+function setDrawerOpen(open) {
+    const drawer = document.getElementById('forensic-drawer');
+    if (drawer) drawer.style.display = open ? '' : 'none';
+    return !!drawer;
+}
+
+function initSocControls() {
+    document.querySelectorAll('[data-ack]').forEach(btn => {
+        btn.addEventListener('click', () => acknowledgeButton(btn));
+    });
+
+    const closeBtn = document.getElementById('btn-close-drawer');
+    if (closeBtn) closeBtn.addEventListener('click', () => setDrawerOpen(false));
+
+    // [ESC] CLOSE says what it does: honour the key it names, but only while the
+    // drawer is actually open, and without stealing the key from the filter
+    // inputs or from graph.js's own Escape handling.
+    window.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        const tag = (e.target && e.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        const drawer = document.getElementById('forensic-drawer');
+        if (drawer && drawer.style.display !== 'none') setDrawerOpen(false);
+    });
+
+    // No audio exists anywhere in this dashboard, so this button cannot mute
+    // anything. It still toggles, because a control that reports its own state is
+    // honest and a control that ignores clicks is not -- but it must not imply
+    // there is sound to silence.
+    const muteBtn = document.getElementById('btn-mute');
+    const muteIcon = document.getElementById('btn-mute-icon');
+    if (muteBtn && muteIcon) {
+        muteBtn.addEventListener('click', () => {
+            const muted = muteIcon.textContent.trim() !== 'volume_off';
+            muteIcon.textContent = muted ? 'volume_off' : 'volume_up';
+            muteBtn.setAttribute('aria-pressed', String(muted));
+            muteBtn.title = muted ? 'No audio output to mute' : 'Audio Mute Toggle';
+        });
+    }
+
+    // Escalation is a view mode here: it highlights the alert banner and says so
+    // on the button. No incident is escalated on the wire, and the label does not
+    // claim otherwise.
+    const escalateBtn = document.getElementById('btn-escalate');
+    const escalateLabel = document.getElementById('btn-escalate-label');
+    const bannerBody = document.getElementById('alert-banner-body');
+    if (escalateBtn && escalateLabel && bannerBody) {
+        escalateBtn.addEventListener('click', () => {
+            const on = !bannerBody.classList.contains('bg-error-container/20');
+            bannerBody.classList.toggle('bg-error-container/20', on);
+            bannerBody.classList.toggle('bg-surface-container-low', !on);
+            escalateLabel.textContent = on ? 'ESCALATED' : 'ESCALATE';
+            escalateBtn.setAttribute('aria-pressed', String(on));
+        });
+    }
+
+    console.log('✓ SOC controls initialized');
+}
+
+document.addEventListener('DOMContentLoaded', initSocControls);
+
+
+// ══════════════════════════════════════════════════════════════════════════════
 // FORENSIC TELEMETRY PANEL
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -473,7 +787,10 @@ function updateForensicPanel(threat) {
         
         drawerHexDump.textContent = hexDump;
     }
-    
+
+    // Selecting a contact reopens the panel, so closing it is never a dead end.
+    setDrawerOpen(true);
+
     console.log('✓ Forensic panel updated for:', threat.src_ip || threat.source_ip);
 }
 

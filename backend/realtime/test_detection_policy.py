@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.realtime.detection_policy import (  # noqa: E402
     DEFAULTS,
+    SPIKE_CRITICAL_CONNECTIONS,
+    SPIKE_HIGH_CONNECTIONS,
     Thresholds,
     calibrate_probability,
     classify_flow,
@@ -33,6 +35,7 @@ from backend.realtime.detection_policy import (  # noqa: E402
     severity_for,
     should_alert,
     sigmoid,
+    spike_severity_for,
 )
 
 _ENV_KEYS = [
@@ -42,6 +45,11 @@ _ENV_KEYS = [
     "BOT_TRAIN_PREVALENCE",
     "BOT_DEPLOY_PREVALENCE",
     "BOT_ROUTE_MAX_CONFIDENCE",
+    # The spike feed's own ladder and emit gate.  Read at import time, so this
+    # list only documents them -- but a policy env var read at import time is
+    # exactly the kind that leaks between tests, so name them here.
+    "SPIKE_HIGH_CONNECTIONS",
+    "SPIKE_CRITICAL_CONNECTIONS",
 ]
 
 
@@ -382,6 +390,85 @@ def test_severity_ladder_unchanged():
     assert severity_for(0.70, th) == "High"
     assert severity_for(0.50, th) == "Medium"
     assert severity_for(0.10, th) == "Low"
+
+
+# ── Spike severity ladder ──────────────────────────────────────────────────────
+# stream_alerts grade a connection count, not a probability, so they run through
+# spike_severity_for rather than severity_for.  The cutoffs used to be inlined in
+# streaming_detector._severity; the dashboard now prints them in its radar legend,
+# which is why they live in the policy module where both can read them.
+
+
+def test_spike_ladder_boundaries():
+    """Each rung starts *at* its cutoff, inclusive."""
+    assert spike_severity_for(SPIKE_HIGH_CONNECTIONS - 1) == "Medium"
+    assert spike_severity_for(SPIKE_HIGH_CONNECTIONS) == "High"
+    assert spike_severity_for(SPIKE_CRITICAL_CONNECTIONS - 1) == "High"
+    assert spike_severity_for(SPIKE_CRITICAL_CONNECTIONS) == "Critical"
+
+
+def test_spike_ladder_is_total_and_monotonic():
+    """No count is ungraded, and severity never falls as the count grows."""
+    order = {"Medium": 0, "High": 1, "Critical": 2}
+    counts = [0, 1, 49, 50, 199, 200, 201, 499, 500, 501, 5_000]
+    grades = [spike_severity_for(c) for c in counts]
+    assert all(g in order for g in grades)
+    assert [order[g] for g in grades] == sorted(order[g] for g in grades)
+
+
+def test_spike_emit_gate_is_not_a_severity_rung():
+    """The 50-count gate decides *whether* an alert exists; the ladder decides
+    how bad it is.  Medium is the ladder's floor -- it must not degrade to some
+    "below-gate" grade, because the legend prints the gate as Medium's range
+    ("spike 50-199 conn/window") and a rung below Medium would make that a lie.
+    """
+    assert spike_severity_for(1) == "Medium"
+    assert spike_severity_for(50) == "Medium"
+    assert spike_severity_for(199) == "Medium"
+
+
+def test_spike_cutoffs_are_ordered():
+    """A Critical rung below the High rung would make High unreachable."""
+    assert 0 < SPIKE_HIGH_CONNECTIONS < SPIKE_CRITICAL_CONNECTIONS
+
+
+def test_low_rung_is_unreachable_behind_the_deployed_gate():
+    """Why the radar draws no Low blips, and the legend lists no Low row.
+
+    severity_medium *is* the deployed attack_threshold, so the lowest P(attack)
+    that can produce an ml_alert is already banded Medium: the ladder's bottom
+    rung cannot reach the dashboard.  Measured on this checkout's ml_alerts:
+    {Critical, High, Medium}, never Low.
+    """
+    artifact = Path(__file__).with_name("thresholds.json")
+    if not artifact.is_file():
+        return  # no calibration has been run in this checkout
+    with clean_env():
+        th = load_thresholds(path=artifact)
+    assert th.severity_medium == th.attack_threshold
+
+
+def test_defaults_are_detectable_as_not_deployed():
+    """An unreadable artifact must be distinguishable from a real calibration.
+
+    load_thresholds never raises -- it silently falls back to DEFAULTS -- so the
+    API can only flag "these bands are not the deployed ones" by comparing the
+    numbers or by reading ``source``.  It does both; if either stopped working
+    the radar legend would print default cuts as if they were live.
+    """
+    missing = Path("/nonexistent/thresholds.json")
+    with clean_env():
+        fallback = load_thresholds(path=missing)
+    assert fallback.source == "defaults"
+    assert fallback.severity_medium == DEFAULTS["severity_medium"]
+
+    artifact = Path(__file__).with_name("thresholds.json")
+    if not artifact.is_file():
+        return
+    with clean_env():
+        deployed = load_thresholds(path=artifact)
+    assert deployed.source != "defaults"
+    assert deployed.severity_critical != DEFAULTS["severity_critical"]
 
 
 def test_policy_reports_the_raw_score_it_demands():
