@@ -23,7 +23,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-MONGO_URI = "mongodb://localhost:27017/"
+# Host port published by docker-compose (container 27017 -> host 27018).
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
 DB_NAME = "threvia"
 
 PLOTLY_DARK_LAYOUT = dict(

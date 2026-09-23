@@ -1,0 +1,24 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# THREVIA — development / test dependencies
+# ═══════════════════════════════════════════════════════════════════════════════
+#   pip install -r requirements-dev.txt
+#
+# The test suites are plain unittest modules run directly, so nothing here is
+# needed to *run* the project — only to run its tests:
+#
+#   .\.venv\Scripts\Activate.ps1
+#   python backend/realtime/test_detection_policy.py
+#   python backend/realtime/test_online_learning.py
+#   python backend/realtime/test_alert_aggregation.py
+#   python backend/api/test_radar_sample.py
+#   python backend/api/test_bucket_grid.py
+#
+# Note: backend/api/test_radar_sample.py imports backend/api/main.py, so it needs
+# the API requirements (the `-r requirements.txt` below covers that) and must run
+# on a venv, not a bare interpreter.
+
+-r requirements.txt
+
+# Test runner. The suites also run as `python file.py`; pytest -q collects them
+# together and is what the phase-7 checks use.
+pytest==8.3.3

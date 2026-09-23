@@ -1,0 +1,26 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# THREVIA — host-side Python runtime
+# ═══════════════════════════════════════════════════════════════════════════════
+# Everything the launchers, the phase runners and the API need on the HOST.
+# Spark, HDFS and MongoDB themselves run in containers (see docker-compose.yml);
+# this environment only reaches them over the published ports.
+#
+#   .\setup_env.ps1                 # one step: creates .venv and installs this
+# or by hand:
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1
+#   pip install -r requirements-dev.txt        # runtime + test tooling
+#
+# The per-phase manifests below stay the source of truth for their own phase —
+# this file just composes them, so there is exactly one place to add a pin.
+
+-r backend/api/requirements.txt              # Phase 6 — FastAPI backend
+-r backend/realtime/requirements_phase4.txt  # Phase 4 — Bloom filter + streaming
+-r backend/graph/requirements_phase5.txt     # Phase 5 — graph analytics
+
+# Not included on purpose:
+#   dashboard/requirements.txt — the Streamlit app (dashboard/app.py) is not the
+#   dashboard this project serves and no launcher starts it. The SOC UI is
+#   dashboard/index.html + app.js, served by the FastAPI backend at
+#   http://localhost:8000/dashboard. Install it separately if you want the
+#   Streamlit variant:  pip install -r dashboard/requirements.txt

@@ -2,6 +2,13 @@
 
 **Professional Security Operations Center Interface**
 
+> **Which dashboard is which.** The UI this project serves is
+> `dashboard/index.html` + `app.js` + `graph.js`, served by the FastAPI backend at
+> http://localhost:8000/dashboard — that is what `start_dashboard.ps1` opens.
+> `dashboard/app.py` in this folder is an earlier Streamlit version: no launcher
+> and no compose profile starts it, and its notes below refer to the host MongoDB
+> port 27018 unless it says otherwise.
+
 A military-grade, real-time cybersecurity intelligence dashboard featuring polar attack radar, live threat streaming, and honest ML evaluation metrics.
 
 ---
@@ -14,6 +21,16 @@ A military-grade, real-time cybersecurity intelligence dashboard featuring polar
 - Color-coded severity (Critical, High, Medium)
 - Interactive target selection
 - Keyboard controls ([SPACE] to freeze)
+
+### 🧠 Adaptive Detection · Online Learning
+- Anchor (calibrated) cut vs the cut actually in force, and the delta between them
+- Realized alert rate against its budget, with the clamp band and a saturation flag
+- Drift: PSI/KS against the frozen baseline, verdict, and re-anchor count
+- Residual calibrator: identity vs trained, mean logit shift, cap, update count
+- Analyst verdicts consumed vs recorded, and a rate sparkline against the budget
+- Sourced from `GET /api/v1/learning/status`; labels go back via
+  `POST /api/v1/feedback` (CONFIRM THREAT / MARK FALSE POSITIVE in the drawer)
+- `NO DETECTOR` means no detector has ever reported state — not a detector at zero
 
 ### 📡 Live Telemetry Stream
 - WebSocket real-time threat feed
@@ -111,7 +128,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 2. Start MongoDB (if not running)
-docker start threvia-mongo
+docker start threvia-mongodb
 
 # 3. Start API server
 python main.py
@@ -140,7 +157,7 @@ const WS_BASE = 'ws://your-server:8000';
 
 Edit `backend/api/main.py`:
 ```python
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
 ```
 
 Or set environment variable:
@@ -213,10 +230,10 @@ Dashboard           → Render (Polar Radar, Stream, Metrics)
 curl http://localhost:8000/api/v1/health
 
 # Check MongoDB has data
-docker exec threvia-mongo mongosh threvia --eval "db.security_events.countDocuments()"
+docker exec threvia-mongodb mongosh threvia --eval "db.getCollectionNames()"
 
-# Populate sample data
-python backend/realtime/stream_simulator.py --quick-populate
+# Populate sample data (host-side: MongoDB is published on 27018)
+python backend/realtime/populate_mongo.py
 ```
 
 ### WebSocket disconnects frequently
@@ -252,7 +269,7 @@ curl http://localhost:8000/api/v1/threats/recent
 **Solution:**
 ```powershell
 # Restart MongoDB
-docker restart threvia-mongo
+docker restart threvia-mongodb
 
 # Wait 10 seconds, then restart API
 Start-Sleep -Seconds 10

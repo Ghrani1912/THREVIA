@@ -55,7 +55,7 @@ docker compose up -d
 
 **Time to operational:** 30-40 minutes  
 **Infrastructure:** Docker containers (Hadoop, Spark, MongoDB)  
-**Access dashboard:** http://localhost:8501
+**Access dashboard:** http://localhost:8000/dashboard
 
 ---
 
@@ -256,7 +256,7 @@ docker compose up -d
 **Contact:** threvia-ml-team@domain.com  
 **Documentation:** See `/documentation` folder  
 **Quick Start:** Run `.\run_threvia_pipeline.ps1`  
-**Dashboard:** http://localhost:8501
+**Dashboard:** http://localhost:8000/dashboard
 
 ---
 

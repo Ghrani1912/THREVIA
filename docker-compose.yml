@@ -1,3 +1,39 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# THREVIA — Docker Compose
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Profiles keep the long-running jobs out of a plain `docker compose up -d`, which
+# starts only the infrastructure (HDFS + Spark + MongoDB):
+#
+#   docker compose up -d                                    # infra only
+#   docker compose --profile phase4 up -d                   # + simulator + detector
+#   docker compose --profile phase4 --profile phase6 up -d   # + dashboard (API)
+#
+# Host ports:
+#   http://localhost:9870        HDFS NameNode UI
+#   tcp://localhost:8020         HDFS RPC
+#   http://localhost:8080        Spark Master UI
+#   tcp://localhost:7077         Spark master RPC
+#   mongodb://localhost:27018    MongoDB — mapped to 27018 on the host because 27017
+#                                is commonly already taken by a host MongoDB.
+#                                Containers reach it at mongodb:27017, which is what
+#                                MONGO_URI is set to below. A host-side process
+#                                (the API venv, mongosh, a script) must use 27018 or
+#                                set MONGO_URI itself.
+#   http://localhost:8000/dashboard  SOC dashboard (api service, profile phase6)
+#   tcp://localhost:9999         Stream simulator listener (vestigial — see below)
+#
+# HOW PHASE 4 HANDS DATA OVER — this is a FILESYSTEM spool, not the socket:
+# the simulator writes 1,000-row JSON batches to /tmp/threvia_stream and the
+# detector reads that same directory with Spark's file source. The two services
+# therefore mount the SAME `stream_spool` volume. Without it each container would
+# have its own empty /tmp and the detector would tail nothing forever (the TCP
+# listener on 9999 accepts a connection and closes it; it carries no rows).
+#
+# Models are read from HDFS (hdfs://namenode:8020/threvia/models_clean_v3), so the
+# corpus and trained models must exist there before the detector can start. Build
+# them with .\run_threvia_pipeline.ps1 (see README.md).
+#
 services:
 
   # ─────────────────────────────────────────
@@ -38,6 +74,7 @@ services:
     restart: unless-stopped
     volumes:
       - datanode_data:/hadoop/dfs/data
+      - ./backend:/workspace/backend
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
       - CORE_CONF_hadoop_http_staticuser_user=root
@@ -92,27 +129,38 @@ services:
 
   # ─────────────────────────────────────────
   # PHASE 4 — Stream Simulator
-  # Replays UNSW-NB15 rows as JSON lines over TCP port 9999.
-  # Start this before the streaming-detector.
+  # Replays CIC-IDS-2017 Friday flows (the corpus the deployed models were trained
+  # on, read from HDFS with pyspark) as a controlled-rate stream of 1,000-row JSON
+  # batches written to the shared spool. Start this before streaming-detector.
+  #
+  # The image is the Spark one, not a bare python image: reading HDFS Parquet needs
+  # pyspark AND a JVM, and the simulator holds ~350K rows in memory after that.
+  # SPARK_MASTER=local[1] on purpose — this job is a single-threaded file writer, so
+  # a cluster round-trip would only add executor/Python-version failure modes.
   # ─────────────────────────────────────────
   stream-simulator:
-    image: python:3.11-slim
+    image: apache/spark:latest
     container_name: threvia-stream-simulator
     restart: "no"
     working_dir: /workspace
     volumes:
       - ./backend:/workspace/backend
+      - stream_spool:/tmp/threvia_stream
     environment:
       - STREAM_HOST=0.0.0.0
-      - STREAM_PORT=9999
-      - STREAM_RPS=200          # rows per second
-      - STREAM_LOOP=1           # 1 = loop dataset forever
+      - STREAM_PORT=9999         # vestigial TCP listener; the spool is the real channel
+      - STREAM_RPS=200           # rows per second
+      - STREAM_LOOP=1            # 1 = loop dataset forever
+      - SPARK_MASTER=local[1]
       - PYTHONPATH=/workspace
     ports:
       - "9999:9999"
+    depends_on:
+      namenode:
+        condition: service_healthy
     command: >
-      sh -c "pip install pybloom-live==4.0.0 --quiet &&
-             python backend/realtime/stream_simulator.py"
+      bash -c "pip install pyspark==3.5.1 --quiet &&
+               python backend/realtime/stream_simulator.py"
     networks:
       - threvia-net
     profiles:
@@ -120,8 +168,9 @@ services:
 
   # ─────────────────────────────────────────
   # PHASE 4 — Streaming Detector
-  # Bloom Filter + Spark windowed spike detection.
-  # Reads from stream-simulator:9999, writes alerts to MongoDB.
+  # Reads the shared spool directory, runs three pipelines and writes alerts to
+  # MongoDB: (A) Bloom Filter hits, (B) 60s windowed connection spikes, (C) ML
+  # classification with the online-learning layer in front of the decision.
   # ─────────────────────────────────────────
   streaming-detector:
     image: apache/spark:latest
@@ -130,6 +179,11 @@ services:
     working_dir: /workspace
     volumes:
       - ./backend:/workspace/backend
+      - stream_spool:/tmp/threvia_stream
+      # The learned state is checkpointed here rather than in the container's /tmp,
+      # so a `docker compose up` recreates the container without resetting what the
+      # adaptive layer has learned. Human verdicts live in MongoDB (mongo_data).
+      - learning_state:/var/threvia
     environment:
       - STREAM_HOST=stream-simulator
       - STREAM_PORT=9999
@@ -163,9 +217,27 @@ services:
       # Optional: run a second detector against the same stream for A/B tests.
       # - CHECKPOINT_BASE=/tmp/threvia_checkpoint_b
       # - MAX_FILES_PER_TRIGGER=4
+      #
+      # ── Online / continual learning (backend/realtime/online_learning.py) ──
+      # On by default. It holds the alert RATE at a budget by adapting the cut
+      # inside a band around the calibrated value, and re-ranks scores with a
+      # bounded residual learned from analyst verdicts + the stream's benign
+      # majority. ONLINE_LEARNING=off runs the frozen operating point instead,
+      # which is the matched A/B baseline.
+      # - ONLINE_LEARNING=off
+      - ONLINE_LEARNING_STATE=/var/threvia/learning_state.json
+      # - ONLINE_LEARNING_TARGET_RATE=0.025   # alert-rate budget (fraction of flows)
+      # - ONLINE_LEARNING_MAX_SHIFT=1.5       # cap on the log-odds residual
+      # - ONLINE_LEARNING_CEILING=0.4931      # absolute cap on the adapted cut
+      # - FEEDBACK_POLL_SECONDS=20           # how often analyst verdicts are read
+      # - ONLINE_LEARNING_PRIME=/var/threvia/benign_scores.json  # seed the drift
+      #     reference from the calibration holdout's benign scores instead of
+      #     bootstrapping from the first observed batch
     depends_on:
-      - stream-simulator
-      - mongodb
+      stream-simulator:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
     command: >
       bash -c "pip install pybloom-live==4.0.0 pymongo==4.7.2 pyspark==3.5.1 --quiet &&
                python backend/realtime/streaming_detector.py"
@@ -176,18 +248,60 @@ services:
 
   # ─────────────────────────────────────────
   # MONGODB — Processed events store
+  # Collections: ml_alerts, stream_alerts, bloom_hits, nominal_flows,
+  # manual_review, feedback, learning_telemetry, learning_state
+  # (alert/nominal collections carry a 72h TTL; learning remains).
   # ─────────────────────────────────────────
   mongodb:
     image: mongo:6
     container_name: threvia-mongodb
+    restart: unless-stopped
     ports:
-      - "27018:27017"  # Expose on host port 27018 to avoid conflict with local MongoDB
+      - "27018:27017"  # host 27018 → container 27017 (see the header note)
     environment:
       MONGO_INITDB_DATABASE: threvia
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     networks:
       - threvia-net
+
+  # ─────────────────────────────────────────
+  # PHASE 6 — Dashboard API (FastAPI)
+  # Serves the SOC dashboard and every /api/v1 endpoint the page calls. Optional:
+  # the same server runs on the host with backend/api/.venv (see README.md), which
+  # is easier to iterate against. From compose it is reachable at
+  # http://localhost:8000/dashboard and talks to MongoDB over the compose network.
+  # ─────────────────────────────────────────
+  api:
+    image: python:3.11-slim
+    container_name: threvia-api
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ./backend:/workspace/backend
+      - ./dashboard:/workspace/dashboard
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - MONGO_DB=threvia
+      - PYTHONPATH=/workspace
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    command: >
+      bash -c "pip install --quiet -r backend/api/requirements.txt &&
+               python backend/api/main.py"
+    networks:
+      - threvia-net
+    profiles:
+      - phase6
 
 # ─────────────────────────────────────────
 # VOLUMES
@@ -197,6 +311,12 @@ volumes:
   datanode_data:
   mongo_data:
   spark_tmp:
+  # Shared by stream-simulator and streaming-detector — this IS the Phase 4 data
+  # path. Deleting it stops the detector seeing new flows until the simulator
+  # rewrites batches.
+  stream_spool:
+  # Checkpointed online-learning state for the detector.
+  learning_state:
 
 # ─────────────────────────────────────────
 # NETWORK

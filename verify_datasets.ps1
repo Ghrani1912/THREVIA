@@ -130,7 +130,7 @@ if ($allPresent) {
 else {
     Write-Host "❌ Some required datasets are missing!" -ForegroundColor Red
     Write-Host "`nPlease download missing datasets:" -ForegroundColor Yellow
-    Write-Host "  See DATA_SETUP_GUIDE.md for instructions" -ForegroundColor Gray
+    Write-Host "  See documentation/DATA_SETUP_GUIDE.md for instructions" -ForegroundColor Gray
     Write-Host "`nDataset sources:" -ForegroundColor Yellow
     Write-Host "  • LycoS: https://www.kaggle.com/datasets/mryanm/lycos-ids2018" -ForegroundColor Gray
     Write-Host "  • CIC-IDS-2017: https://www.unb.ca/cic/datasets/ids-2017.html" -ForegroundColor Gray

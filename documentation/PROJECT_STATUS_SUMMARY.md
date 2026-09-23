@@ -27,10 +27,10 @@
 ```
 documentation/
 ├── THREVIA_PRD.md                  # Product Requirements Document
-├── implementation_plan.md          # TEST-C1/C2 split implementation
+├── FINAL_MODEL_EVALUATION.md      # TEST-C1/C2 split implementation
 ├── FINAL_MODEL_EVALUATION.md       # ⭐ Phase 3 comprehensive evaluation
 ├── HONEST_EVAL_REPORT.md          # Detailed honest metrics report
-├── LYCOS_LEAKAGE_ANALYSIS.md      # TEST-A leakage investigation
+├── HONEST_EVAL_REPORT.md          # TEST-A leakage + honest macro-F1
 └── PROJECT_STATUS_SUMMARY.md      # This file (high-level status)
 ```
 
@@ -266,9 +266,9 @@ Total Coverage: 99% with all 4 tiers
 5. **[PHASE_COMPLETION_SUMMARY.md](PHASE_COMPLETION_SUMMARY.md)** — Detailed phase-by-phase report
 
 ### Technical Details
-6. **[implementation_plan.md](implementation_plan.md)** — TEST-C1/C2 split implementation details
+6. **[FINAL_MODEL_EVALUATION.md](FINAL_MODEL_EVALUATION.md)** — TEST-C1/C2 split implementation details
 7. **[HONEST_EVAL_REPORT.md](HONEST_EVAL_REPORT.md)** — Detailed metrics with honest macro-F1 reporting
-8. **[LYCOS_LEAKAGE_ANALYSIS.md](LYCOS_LEAKAGE_ANALYSIS.md)** — TEST-A causal leakage investigation
+8. **[HONEST_EVAL_REPORT.md](HONEST_EVAL_REPORT.md)** — TEST-A causal leakage investigation
 
 ### Where to Start
 - **For stakeholders:** Read PROJECT_STATUS_SUMMARY.md (this file) + DEPLOYMENT_GUIDE.md
@@ -315,7 +315,7 @@ docker compose up -d
 .\run_threvia_pipeline.ps1
 
 # Access dashboard
-# Opens automatically at: http://localhost:8501
+# Opens automatically at: http://localhost:8000/dashboard
 ```
 
 **See:** [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for detailed instructions

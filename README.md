@@ -11,19 +11,37 @@ A scalable Big Data cybersecurity intelligence platform for detecting, analyzing
 
 ## ⚡ Quick Start
 
-**⚠️ FIRST TIME SETUP:** Datasets are NOT included in this repository. **[Download datasets first →](DATA_SETUP_GUIDE.md)**
+**⚠️ FIRST TIME SETUP:** Datasets are NOT included in this repository —
+**[download them first →](documentation/DATA_SETUP_GUIDE.md)**, then confirm with
+`.\verify_datasets.ps1`.
 
 ```powershell
-# Start infrastructure
+# 1. Host Python environment — creates ./.venv and installs the requirements
+.\setup_env.ps1
+
+# 2. Infrastructure: HDFS + Spark + MongoDB
 docker compose up -d
 
-# Run complete pipeline (30-40 minutes)
+# 3. Upload the raw datasets, then run all 7 phases (30-40 minutes)
 .\run_threvia_pipeline.ps1
 
-# Access dashboard at http://localhost:8501
+# 4. Dashboard (served by the FastAPI backend)
+#    http://localhost:8000/dashboard
 ```
 
-**See [QUICKSTART.md](QUICKSTART.md) for detailed instructions**
+Already trained and just want the dashboard up?
+```powershell
+docker compose up -d      # MongoDB must be running
+.\start_dashboard.ps1     # makes backend/api/.venv, populates sample data, serves the UI
+```
+
+Want live streaming alerts (simulator + detector as containers)?
+```powershell
+docker compose --profile phase4 up -d
+```
+
+**Step-by-step walkthrough:** [QUICK_START.md](QUICK_START.md). Full prerequisite
+list: [Running this on another machine](#running-this-on-another-machine).
 
 ---
 
@@ -35,8 +53,14 @@ docker compose up -d
 | **[THREVIA PRD](documentation/THREVIA_PRD.md)** | Product requirements, goals, architecture | All team members |
 | **[Phase 3 Model Evaluation](documentation/FINAL_MODEL_EVALUATION.md)** | Comprehensive ML model evaluation | ML Engineers, Data Scientists |
 | **[Honest Eval Report](documentation/HONEST_EVAL_REPORT.md)** | Detailed metrics with honest macro-F1 | Technical reviewers |
-| **[LycoS Leakage Analysis](documentation/LYCOS_LEAKAGE_ANALYSIS.md)** | TEST-A causal leakage investigation | ML Engineers |
-| **[Implementation Plan](documentation/implementation_plan.md)** | TEST-C1/C2 split technical details | Developers |
+| **[Leakage & test design](documentation/FINAL_MODEL_EVALUATION.md)** | TEST-A causal leakage, TEST-C1/C2 split details | ML Engineers |
+| **[Deployment guide](documentation/DEPLOYMENT_GUIDE.md)** | Ports, health checks, troubleshooting | Operators |
+| **[Dataset setup](documentation/DATA_SETUP_GUIDE.md)** | Where to download every dataset | Everyone |
+| **[Dashboard explained](documentation/DASHBOARD_EXPLAINED.md)** | What the SOC UI shows and why | Reviewers |
+
+> There are no separate `LYCOS_LEAKAGE_ANALYSIS.md` / `implementation_plan.md`
+> documents — the leakage investigation and the split design live inside
+> `FINAL_MODEL_EVALUATION.md` and `HONEST_EVAL_REPORT.md`.
 
 ---
 
@@ -44,45 +68,55 @@ docker compose up -d
 
 ```
 Threvia/
-├── docker-compose.yml       # All services (Hadoop, Spark, MongoDB)
-├── hadoop.env               # Hadoop config shared by containers
+├── docker-compose.yml          # Infra + profiled jobs (HDFS, Spark, MongoDB,
+│                               #   simulator, detector, API)
+├── requirements.txt            # Host dependencies (composes the 3 phase manifests)
+├── requirements-dev.txt        # The above + pytest
+├── setup_env.ps1               # Creates ./.venv and installs them
 ├── .gitignore
-├── THREVIA_PRD.md
 │
-├── backend/                 # All data processing, ML, analytics
-│   ├── data/                # Raw datasets (NOT committed to git)
-│   │   ├── CIC-IDS- 2017/   # Original CICIDS2017 (8 CSVs)
-│   │   ├── LYCSOS/          # LycoS-IDS2018 (5.2 GB, primary training source)
-│   │   ├── CICIDS2018/      # CICIDS2018 Thursday + Wednesday (Infiltration)
-│   │   ├── UNSW-NB15/       # UNSW-NB15 (future cross-dataset experiment)
-│   │   ├── IDS2025 .../     # IDS2025 XLSX (held-out validation)
-│   │   ├── portscan_clean/  # Deduped + port-grouped PortScan splits
-│   │   └── ids2025_clean/   # IDS2025 converted to CSV
-│   ├── ingestion/           # Phase 1: data loading & validation
-│   ├── processing/          # Phase 2 + 3a: PySpark cleaning, corpus merge
+├── backend/                    # All data processing, ML, analytics
+│   ├── data/                   # Raw datasets (NOT committed — see the setup guide)
+│   │   ├── CIC-IDS- 2017/      # Original CICIDS2017 (8 CSVs)
+│   │   ├── LYCSOS/             # LycoS-IDS2018 (5.2 GB, primary training source)
+│   │   ├── CICIDS2018/         # CICIDS2018 Thursday + Wednesday (Infiltration)
+│   │   ├── UNSW-NB15/          # UNSW-NB15 (future cross-dataset experiment)
+│   │   ├── IDS2025 .../        # IDS2025 XLSX (held-out validation)
+│   │   ├── portscan_clean/     # Deduped + port-grouped PortScan splits
+│   │   └── ids2025_clean/      # IDS2025 converted to CSV
+│   ├── api/                    # Phase 6: FastAPI backend — serves the UI + /api/v1
+│   ├── ingestion/              # Phase 1: data loading & validation
+│   ├── processing/             # Phase 2 + 3a: PySpark cleaning, corpus merge
 │   │   ├── schema_maps.py          # Column rename maps (LycoS, CIC18, IDS25)
 │   │   ├── merge_corpus.py         # Unified training corpus builder
 │   │   ├── convert_ids2025.py      # XLSX → CSV + HDFS upload
 │   │   ├── portscan_split.py       # Dedup + grouped split
 │   │   ├── zerovar_diagnostic.py   # Data quality diagnostic
-│   │   └── upload_corpus_sources.ps1
-│   ├── ml/                  # Phase 3: MLlib classification & clustering
-│   ├── realtime/            # Phase 4: Bloom filter & streaming
+│   │   └── upload_corpus_sources.ps1   # LycoS / CIC18 / PortScan → HDFS
+│   ├── ml/                     # Phase 3: MLlib classification & clustering
+│   ├── realtime/               # Phase 4: Bloom filter & streaming
 │   │   ├── bloom_filter.py         # Threat intelligence Bloom Filter
 │   │   ├── streaming_detector.py   # Spark Streaming detection
 │   │   ├── stream_simulator.py     # Network traffic simulator
+│   │   ├── online_learning.py      # Adaptive cut + bounded residual layer
+│   │   ├── thresholds.json         # Deployed operating point (read, not restated)
 │   │   └── run_phase4.py           # Phase 4 runner
-│   ├── graph/               # Phase 5: Graph analytics
-│   │   ├── graph_builder.py        # Entity graph construction
-│   │   ├── graph_analytics.py      # Centrality + communities
-│   │   └── run_phase5.py           # Phase 5 runner
-│   └── utils/               # Shared helpers
+│   └── graph/                  # Phase 5: Graph analytics
+│       ├── graph_builder.py        # Entity graph construction
+│       ├── graph_analytics.py      # Centrality + communities
+│       └── run_phase5.py           # Phase 5 runner
 │
-├── dashboard/               # Phase 6: Streamlit frontend
-│   ├── app.py                      # Main dashboard
+├── dashboard/                  # Phase 6: the SOC UI served at /dashboard
+│   ├── index.html              #   + app.js / graph.js  (what the API serves)
+│   ├── app.py                  # legacy Streamlit variant — no launcher starts it
 │   └── requirements.txt
 │
-└── run_threvia_pipeline.ps1 # END-TO-END PIPELINE RUNNER (All 7 phases)
+├── documentation/              # Reports, PRD, dataset + deployment guides
+└── *.ps1                       # Launchers: setup_env, verify_datasets,
+                                #   upload_datasets, run_threvia_pipeline,
+                                #   start_dashboard, start_threvia,
+                                #   populate_sample_data, run_phase4_docker,
+                                #   run_detector_only
 ```
 
 ---
@@ -127,51 +161,176 @@ The pipeline will execute:
 ## Manual Setup (Development)
 
 ### Prerequisites
-- Docker Desktop running
-- WSL2 enabled (Windows)
-- ~4 GB RAM available for containers
+- Docker Desktop running (with WSL2 on Windows)
+- Python 3.10+ on PATH
+- PowerShell (the launchers are `.ps1`)
+- ~4 GB RAM free for containers, ~10 GB disk for the datasets
 
-### Step 1 — Start all services
-```bash
+### Step 1 — Host Python environment
+```powershell
+.\setup_env.ps1
+```
+Creates `./.venv` and installs `requirements-dev.txt`. Activate it in each new
+shell before running anything host-side:
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+(`backend/api/.venv` is a separate, smaller environment that `start_dashboard.ps1`
+creates for the API from `backend/api/requirements.txt`.)
+
+### Step 2 — Start the infrastructure
+```powershell
 docker compose up -d
 ```
 
-This starts:
-| Service | URL |
-|---|---|
-| HDFS NameNode Web UI | http://localhost:9870 |
-| Spark Master Web UI | http://localhost:8080 |
-| MongoDB | localhost:27017 |
+This starts five services — the two optional job profiles stay off until asked:
 
-The `hdfs-init` container will automatically:
-1. Wait for HDFS to be ready
-2. Create `/threvia/raw`, `/threvia/processed`, `/threvia/output`
-3. Upload all 8 CICIDS2017 CSVs into `/threvia/raw/`
+| Service | Container | Host address |
+|---|---|---|
+| HDFS NameNode Web UI | `threvia-namenode` | http://localhost:9870 |
+| HDFS RPC | `threvia-namenode` | `hdfs://localhost:8020` |
+| Spark Master Web UI | `threvia-spark-master` | http://localhost:8080 |
+| Spark master RPC | `threvia-spark-master` | `spark://localhost:7077` |
+| MongoDB | `threvia-mongodb` | `mongodb://localhost:27018` |
+| Stream simulator | `threvia-stream-simulator` | profile `phase4` |
+| Streaming detector | `threvia-streaming-detector` | profile `phase4` |
+| Dashboard API | `threvia-api` | http://localhost:8000/dashboard — profile `phase6` |
 
-### Step 2 — Validate the upload
-```bash
+Note MongoDB is published on **27018**, not 27017, because 27017 is commonly
+taken by a MongoDB installed on the host. Containers still reach it at
+`mongodb:27017` (that is what `MONGO_URI` is set to in compose); host-side Python
+(the API, the populator, the graph exporter) defaults to 27018 to match.
+
+### Step 3 — Upload the datasets to HDFS
+```powershell
+.\verify_datasets.ps1        # are the CSVs on disk?
+.\upload_datasets.ps1 -All   # raw CIC-IDS-2017 + the Phase 2 corpus sources
+```
+`upload_datasets.ps1` is idempotent: files already in HDFS are skipped, so it is
+cheap to re-run. Phase 1 validates `/threvia/raw`, so this has to happen before
+the pipeline (Step 4).
+
+### Step 4 — Validate the upload
+```powershell
 docker exec threvia-namenode python3 /workspace/backend/ingestion/validate_hdfs.py
 ```
 
-Or manually inspect HDFS:
-```bash
+Or inspect HDFS directly:
+```powershell
 docker exec threvia-namenode hdfs dfs -ls /threvia/raw
 ```
 
-### Step 3 — Inspect the dataset locally (optional)
-```bash
+### Step 5 — Inspect a dataset locally (optional)
+```powershell
 python backend/ingestion/inspect_dataset.py
 ```
 
 ### Stop everything
-```bash
+```powershell
 docker compose down
 ```
 
-To also wipe volumes (HDFS data):
-```bash
+To also wipe volumes (HDFS data, MongoDB, learned state):
+```powershell
 docker compose down -v
 ```
+
+---
+
+## Running this on another machine
+
+Everything needed to reproduce a run is in git **except the datasets and the
+trained models** — both are too large. The complete checklist:
+
+| # | Requirement | How |
+|---|---|---|
+| 1 | Docker Desktop | https://www.docker.com/products/docker-desktop |
+| 2 | Python 3.10+ on PATH | `python --version` |
+| 3 | Host Python deps | `.\setup_env.ps1` → `./.venv` from `requirements-dev.txt` |
+| 4 | Datasets (~8.7 GB) | [documentation/DATA_SETUP_GUIDE.md](documentation/DATA_SETUP_GUIDE.md), then `.\verify_datasets.ps1` |
+| 5 | HDFS upload | `.\upload_datasets.ps1 -All` (after `docker compose up -d`) |
+| 6 | Trained models | produced by Phase 3, stored in HDFS — a fresh clone must run `.\run_threvia_pipeline.ps1` at least once, or receive the HDFS volumes |
+| 7 | MongoDB contents | the detector fills it live; for a demo `.\start_dashboard.ps1` populates sample data |
+
+What is deliberately **not** in git: `backend/data/**` (datasets, ignored),
+trained models (they live in HDFS under `/threvia/models_clean_v3`), the Bloom
+filter pickle and the PyVis export (both regenerated), every venv, and the
+per-machine `.env`/`hadoop.env` files.
+
+Common failure modes on a new machine:
+- **`MongoServerSelectionError` from a host script** → Mongo is on 27018; sets
+  `MONGO_URI` or fix the port. Inside containers it is `mongodb:27017`.
+- **Phase 1 reports missing files** → you skipped `upload_datasets.ps1`.
+- **The dashboard loads but is empty** → MongoDB has no documents yet. Run
+  `.\populate_sample_data.ps1` (sample data) or `docker compose --profile phase4
+  up -d` (live stream).
+- **`docker compose up -d` starts no detector** → that is the profiles working:
+  add `--profile phase4` (simulator + detector) and/or `--profile phase6` (API).
+
+---
+
+## Adaptive detection (online learning)
+
+Phase 4 ships a second layer that sits between the frozen Random Forest's score and
+the alert decision. **The model is not retrained.**
+`backend/realtime/online_learning.py` changes *where the line falls* and re-ranks
+scores, and every change it makes is bounded, reversible and visible in the UI. It
+exists because the deployed operating point was calibrated on the lab corpus, and
+live traffic is not that corpus.
+
+Three parts, in increasing order of what they are allowed to change:
+
+| Part | What it does | Bound |
+|---|---|---|
+| **Drift monitor** | PSI + KS of a 20-bin score histogram against a frozen baseline. A *persistent* shift re-anchors the baseline and increments a counter, so "re-anchors ≥ 1" is a durable statement that live traffic differs from the calibration corpus. | Decides nothing |
+| **Rate control** | Label-free. Holds the fraction of scored flows that alert at `target_alert_rate` by tracking the `1−budget` quantile of recent adapted scores. | Cut clamped to `0.5× … min(4×, ceiling)` around the calibrated anchor |
+| **Residual calibrator** | Supervised logistic correction over `[bias, logit p, bot evidence, novelty, drift]`, AdaGrad with L2 + forgetting. | `|w·φ| ≤ 1.5` logits; at `w = 0` it is the exact identity |
+
+Supervision is **analyst verdicts** (the drawer's CONFIRM THREAT / MARK FALSE
+POSITIVE buttons, or `POST /api/v1/feedback`) plus the stream's benign majority —
+accepted only below `0.10 × cut`, down-weighted to 0.25, and **switched off while
+drift is severe**, because in a severe shift "scored low" is evidence of novelty,
+not of benignity. It never trains on its own predictions: that is confirmation bias
+with a drift-driven amplifier.
+
+Controls (all read by `OnlineLearningConfig.from_env()`; the commented-out block is
+already in `docker-compose.yml` under `streaming-detector`):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ONLINE_LEARNING` | `on` | `off` runs the frozen operating point — the matched A/B baseline |
+| `ONLINE_LEARNING_TARGET_RATE` | `0.025` | alert-rate budget, as a fraction of scored flows |
+| `ONLINE_LEARNING_STEP` | `0.25` | EMA pull toward the budget-quantile cut, per batch |
+| `ONLINE_LEARNING_MAX_SHIFT` | `1.5` | cap on the residual, in log-odds |
+| `ONLINE_LEARNING_CEILING` | *unset* | absolute cap on the adapted cut (e.g. the severity ladder's top rung) |
+| `ONLINE_LEARNING_STATE` | `/tmp/threvia_learning_state.json` | checkpoint path; compose points it at the `learning_state` volume |
+| `ONLINE_LEARNING_PRIME` | *unset* | JSON file of known-benign scores, to seed the drift reference instead of bootstrapping from the first batch |
+| `FEEDBACK_POLL_SECONDS` | `20` | how often the detector reads new verdicts |
+
+**Where to see it.** The dashboard's *ADAPTIVE DETECTION · ONLINE LEARNING* panel
+shows anchor → adapted cut, realized rate vs budget, PSI/KS/verdict/re-anchors, the
+residual's norm and update count, verdicts consumed vs recorded, and a rate
+sparkline against the budget. The same data is at `GET /api/v1/learning/status`.
+State is checkpointed to disk *and* mirrored into MongoDB (`learning_state`,
+`learning_telemetry`, `feedback`) because the API runs in a different process from
+the detector; delete the `learning_state` volume to start learning from scratch.
+
+**What it deliberately does not do**, so this does not read as more than it is:
+- It cannot recover an attack the frozen model scores below the gate. A bounded
+  post-hoc correction does not move a novel attack family the corpus never
+  contained — that needs the offline retrain loop, and the verdicts and telemetry
+  this layer accumulates are exactly that loop's input.
+- The rate target is subordinate to the band. On an attack-dense stream the
+  requested rate is unreachable, so the controller saturates at its ceiling and
+  reports `budget_saturated` rather than silently muting real detections.
+- Its defaults are slow on purpose: adapting a *measured* operating point quickly
+  is how you lose the ability to explain a decision afterwards.
+
+Verified directly (no Docker needed) by driving the policy: 20 attack-dense batches
+push the cut to its ceiling with `budget_saturated` set, 20 quiet batches relax it
+back to the anchor, re-anchoring fires with a logged warning, duplicate and unusable
+verdicts are skipped, and save/reload round-trips the cut, label count and weights.
+Unit suite: `python backend/realtime/test_online_learning.py` (24 tests).
 
 ---
 
@@ -198,7 +357,8 @@ Phase 5: GRAPH ANALYSIS (✅ Complete)
     Entity graph → Centrality → Community detection → Visualization
                               ↓
 Phase 6: DASHBOARD (✅ Complete)
-    Interactive Streamlit dashboard → Trends, graphs, metrics
+    FastAPI backend + SOC UI (index.html/app.js) → radar, spectral, topology,
+    telemetry stream, online-learning panel
                               ↓
 Phase 7: INTEGRATION (✅ Complete)
     End-to-end testing + Documentation + Polish
@@ -305,7 +465,7 @@ Key scripts in `backend/processing/`:
 > **Note:** CIC-IDS-2017 was used for the initial Phase 3 evaluation but was found to have
 > significant data quality issues (42.9% duplicate rows in PortScan, 14.3% cross-boundary
 > leakage in random splits, 214+ zero-variance deterministic feature signatures). See
-> `backend/processing/leakage_check.py` and `backend/ml/advanced_eval.py` for full diagnostics.
+> `backend/ml/leakage_check.py` and `backend/ml/advanced_eval.py` for full diagnostics.
 
 ---
 

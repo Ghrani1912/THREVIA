@@ -56,7 +56,7 @@ THREVIA is a complete big data cybersecurity intelligence platform with:
 
 **IMPORTANT:** Datasets are NOT included in the repository (15 GB total).
 
-**You must download them separately:** See **[DATA_SETUP_GUIDE.md](../DATA_SETUP_GUIDE.md)** for:
+**You must download them separately:** See **[DATA_SETUP_GUIDE.md](DATA_SETUP_GUIDE.md)** for:
 - Required datasets (LycoS, CIC-IDS-2017, CICIDS2018)
 - Download links (free, registration required)
 - Installation instructions
@@ -73,10 +73,15 @@ THREVIA is a complete big data cybersecurity intelligence platform with:
 | Port | Service | Purpose |
 |------|---------|---------|
 | 9870 | HDFS NameNode | Web UI |
-| 8088 | YARN ResourceManager | Web UI |
+| 8020 | HDFS RPC | Filesystem |
 | 8080 | Spark Master | Web UI |
-| 27017 | MongoDB | Database |
-| 8501 | Streamlit | Dashboard |
+| 7077 | Spark master RPC | Cluster |
+| 27018 | MongoDB | Database (host port; container 27017) |
+| 8000 | FastAPI + SOC dashboard | http://localhost:8000/dashboard |
+
+> The simulator/detector (`--profile phase4`) add 9999. The Streamlit app
+> (`dashboard/app.py`, not started by any launcher) would use 8501; the served
+> dashboard is the FastAPI one on 8000.
 
 ---
 
@@ -116,7 +121,7 @@ This executes all 7 phases:
 
 ### 4. Access Dashboard
 
-Dashboard automatically opens at: http://localhost:8501
+Dashboard automatically opens at: http://localhost:8000/dashboard
 
 If not, run manually:
 ```powershell
@@ -294,7 +299,7 @@ docker exec threvia-spark-master /opt/spark/bin/spark-submit --master spark://sp
 
 #### MongoDB Connection
 ```powershell
-docker exec threvia-mongo mongosh threvia --eval "db.security_events.countDocuments()"
+docker exec threvia-mongodb mongosh threvia --eval "db.getCollectionNames()"
 ```
 
 ### Log Access
@@ -307,7 +312,7 @@ docker logs threvia-namenode
 docker logs threvia-spark-master
 
 # MongoDB logs
-docker logs threvia-mongo
+docker logs threvia-mongodb
 
 # Dashboard logs
 # (stdout when running streamlit)
@@ -357,10 +362,10 @@ pymongo.errors.ServerSelectionTimeoutError
 **Solution:**
 ```powershell
 # Restart MongoDB
-docker restart threvia-mongo
+docker restart threvia-mongodb
 
 # Check status
-docker exec threvia-mongo mongosh --eval "db.adminCommand('ping')"
+docker exec threvia-mongodb mongosh --eval "db.adminCommand('ping')"
 ```
 
 #### 4. Dashboard Empty
@@ -369,12 +374,38 @@ docker exec threvia-mongo mongosh --eval "db.adminCommand('ping')"
 
 **Solution:**
 ```powershell
-# Populate sample data
-python backend/realtime/stream_simulator.py --quick-populate
+# Populate sample data (host-side: MongoDB is published on 27018)
+python backend/realtime/populate_mongo.py
 
-# Restart dashboard
-streamlit run dashboard/app.py
+# Reload the page. The FastAPI backend serves the UI, so there is nothing to
+# restart — if it is not running at all, use:
+.\start_dashboard.ps1
 ```
+
+For live alerts instead of synthetic sample data:
+```powershell
+docker compose --profile phase4 up -d
+```
+
+#### 4b. ONLINE LEARNING panel reads `NO DETECTOR`
+
+**Symptom:** The adaptive-detection panel shows dashes and `NO DETECTOR`.
+
+**Cause:** Nothing has written `learning_state` — the detector is not running, or
+it is running with `ONLINE_LEARNING=off`. This is an absence of telemetry, not a
+layer operating at zero.
+
+**Solution:**
+```powershell
+# Start simulator + detector (profile phase4)
+docker compose --profile phase4 up -d
+
+# Confirm the detector is reporting
+docker exec threvia-mongodb mongosh threvia --quiet --eval "db.learning_state.countDocuments()"
+```
+
+If it stays empty, check the detector's log for the per-batch learning line, and
+confirm `ONLINE_LEARNING_STATE` is writable (the `learning_state` volume).
 
 #### 5. Port Conflicts
 
@@ -408,7 +439,7 @@ spark-master:
 
 ```javascript
 // Connect to MongoDB
-docker exec -it threvia-mongo mongosh threvia
+docker exec -it threvia-mongodb mongosh threvia
 
 // Create indexes
 db.security_events.createIndex({ timestamp: -1 })
@@ -452,7 +483,8 @@ db.security_events.createIndex({ predicted_label: 1 })
 - [Project Status](PROJECT_STATUS_SUMMARY.md)
 - [Model Evaluation](FINAL_MODEL_EVALUATION.md)
 - [Honest Eval Report](HONEST_EVAL_REPORT.md)
-- [LycoS Leakage Analysis](LYCOS_LEAKAGE_ANALYSIS.md)
+- [Leakage analysis + honest metrics](HONEST_EVAL_REPORT.md)
+- [Full model evaluation](FINAL_MODEL_EVALUATION.md)
 - [THREVIA PRD](THREVIA_PRD.md)
 
 ### Key Scripts
@@ -473,7 +505,7 @@ db.security_events.createIndex({ predicted_label: 1 })
 - [ ] Docker containers running (`docker ps`)
 - [ ] HDFS datasets uploaded (`validate_hdfs.py`)
 - [ ] 16 GB RAM available
-- [ ] Ports 9870, 8080, 8501, 27017 free
+- [ ] Ports 9870, 8020, 8080, 7077, 8000, 27018 free
 
 ### Deployment
 - [ ] Phase 1: Foundation validated
@@ -485,7 +517,7 @@ db.security_events.createIndex({ predicted_label: 1 })
 - [ ] Phase 7: Integration checks passed
 
 ### Post-Deployment
-- [ ] Dashboard verified (http://localhost:8501)
+- [ ] Dashboard verified (http://localhost:8000/dashboard)
 - [ ] Real-time alerts flowing to MongoDB
 - [ ] Graph visualization renders
 - [ ] No error logs in containers

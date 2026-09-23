@@ -11,9 +11,13 @@ If you've already trained the models and just want to view the dashboard:
 This script will:
 1. ✅ Check if Docker containers are running (starts them if needed)
 2. ✅ Create Python virtual environment (only first time)
-3. ✅ Check if MongoDB has data (populates sample data if empty)
+3. ✅ Count the dashboard's collections (populates sample data if all are empty)
 4. ✅ Start the FastAPI backend server
 5. ✅ Open the dashboard in your browser
+
+> **Prerequisite:** the trained models must already be in HDFS. On a machine that
+> has never run the pipeline, do the full setup first — `.\setup_env.ps1`, then
+> `.\run_threvia_pipeline.ps1`. See the Quick Start in [README.md](README.md).
 
 **Dashboard URL:** http://localhost:8000/dashboard
 
@@ -75,9 +79,45 @@ When you see "Creating Python virtual environment...", it means:
 # Activate the API virtual environment first
 & backend/api/.venv/Scripts/Activate.ps1
 
-# Run the simulator
-python backend/realtime/stream_simulator.py --quick-populate
+# Insert sample security events (host-side: connects on port 27018)
+python backend/realtime/populate_mongo.py
 ```
+
+Or just run `.\populate_sample_data.ps1`, which does both of the above.
+
+---
+
+## Adaptive Detection — what the ONLINE LEARNING panel shows
+
+The streaming detector is not just the trained model. In front of its decision sits
+an adaptive layer (`backend/realtime/online_learning.py`) that measures drift against
+the calibration corpus, holds the alert *rate* at a budget, and re-ranks scores with
+a bounded correction learned from analyst verdicts. See
+[README → Adaptive detection](README.md#adaptive-detection-online-learning).
+
+**To watch it work:**
+```powershell
+docker compose --profile phase4 up -d   # simulator + detector
+docker compose --profile phase6 up -d   # API + dashboard (or use start_dashboard.ps1)
+```
+Then open http://localhost:8000/dashboard. The panel shows the calibrated cut, the
+adapted cut, the realized rate against the budget, PSI/KS with a drift verdict, and
+how many verdicts it has consumed. `NO DETECTOR` in that panel means no detector has
+reported state — an absence of telemetry, not a detector reading zero.
+
+**To label a detection** (this is the only human supervision it gets): open an
+incident in the drawer and press CONFIRM THREAT or MARK FALSE POSITIVE. The verdict
+is posted to `POST /api/v1/feedback` and applied on the detector's next poll
+(`FEEDBACK_POLL_SECONDS`, default 20 s). A contact with no P(attack) — a Bloom hit —
+cannot train the calibrator, and the panel says so.
+
+**To turn it off** and run the frozen operating point (the matched A/B):
+```powershell
+$env:ONLINE_LEARNING="off"     # or uncomment ONLINE_LEARNING=off in docker-compose.yml
+```
+
+**To reset what it has learned:** `docker compose down -v` wipes the `learning_state`
+volume, or set `ONLINE_LEARNING_STATE` elsewhere to keep two detectors' state apart.
 
 ---
 
@@ -90,10 +130,15 @@ python backend/realtime/stream_simulator.py --quick-populate
 **Solution:**
 ```powershell
 & backend/api/.venv/Scripts/Activate.ps1
-python backend/realtime/stream_simulator.py --quick-populate
+python backend/realtime/populate_mongo.py
 ```
 
 Then refresh the dashboard (F5).
+
+For *live* alerts instead of sample data, run the streaming stack:
+```powershell
+docker compose --profile phase4 up -d
+```
 
 ### 2. "API Connection Failed"
 
@@ -114,6 +159,9 @@ Get-Process python | Where-Object {$_.CommandLine -like "*main.py*"}
 ```powershell
 docker compose up -d
 ```
+
+If the dashboard loads but the panel reads `NO DETECTOR`, the streaming profile is
+not running — that panel needs `--profile phase4`, not just the infrastructure.
 
 ### 4. Why does everything run again when I restart?
 
@@ -181,7 +229,7 @@ After starting:
 They will need:
 1. ✅ Docker Desktop installed
 2. ✅ Python 3.9+ installed
-3. ✅ Datasets downloaded (see `DATA_SETUP_GUIDE.md`)
+3. ✅ Datasets downloaded (see `documentation/DATA_SETUP_GUIDE.md`)
 4. ⚠️ **Trained models** - either:
    - Run full pipeline once (`run_threvia_pipeline.ps1`)
    - OR receive your pre-trained model files
@@ -198,11 +246,11 @@ They will need:
 1. **First time?** → Run `.\start_dashboard.ps1`
 2. **Dashboard empty?** → Populate data (see "Common Issues #1")
 3. **Need to retrain models?** → Run `.\run_threvia_pipeline.ps1`
-4. **Ready for deployment?** → See `DISTRIBUTION_CHECKLIST.md`
+4. **Ready for deployment?** → See `documentation/DEPLOYMENT_GUIDE.md`
 
 ---
 
 **Questions?** Check:
 - `documentation/PROJECT_STATUS_SUMMARY.md` - Overall project status
 - `documentation/FINAL_MODEL_EVALUATION.md` - ML performance metrics
-- `DATA_SETUP_GUIDE.md` - Dataset download instructions
+- `documentation/DATA_SETUP_GUIDE.md` - Dataset download instructions

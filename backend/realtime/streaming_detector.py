@@ -23,6 +23,20 @@ Severity mapping (connections per window) — see
   ≥  50   → Medium     (SPIKE_THRESHOLD — the gate *below* this, no alert is
                         emitted at all, so Medium is the ladder's floor)
 
+Online / continual learning
+---------------------------
+The gate model was trained and evaluated on one corpus, so its score scale and its
+operating point are properties of that corpus.  ``online_learning.py`` sits between
+the model's score and the alert decision and adapts both to the traffic actually
+being seen: a label-free controller holds the alert *rate* at a budget by tracking
+the recent score distribution, and a bounded logistic residual learns from analyst
+verdicts plus the stream's benign majority.  Enabled by default
+(``ONLINE_LEARNING=off`` disables it entirely, which is the correct way to run a
+matched A/B against the frozen model).  The layer is an exact identity until
+evidence exists, its cut can never leave the calibrated band, and its residual can
+never exceed ``ONLINE_LEARNING_MAX_SHIFT`` logits -- see that module for why each
+bound is there rather than a tuning knob.
+
 Pipeline C decision policy
 --------------------------
 Pipeline C's thresholds live in ``backend/realtime/detection_policy.py`` rather
@@ -73,6 +87,13 @@ Environment variables:
     NOMINAL_SAMPLE_RATE      fraction of benign flows mirrored to the
                              nominal_flows collection (default 0.02, 0 = off)
     ALERT_TTL_HOURS          retention for alert/nominal collections (default 72)
+    ONLINE_LEARNING          on/off for the adaptive layer (default on)
+    ONLINE_LEARNING_STATE    checkpoint path (default <CHECKPOINT_BASE>_learning.json)
+    ONLINE_LEARNING_TARGET_RATE  alert-rate budget (default 0.025)
+    ONLINE_LEARNING_MAX_SHIFT    cap on the log-odds residual (default 1.5)
+    FEEDBACK_POLL_SECONDS    how often to read new analyst verdicts (default 20)
+    ONLINE_LEARNING_PRIME    optional JSON file of known-benign scores (or
+                             {"scores": [...]}) used to seed the drift reference
 
 Dependencies: pyspark>=3.3, pybloom-live, pymongo
 """
@@ -94,6 +115,9 @@ from pyspark.ml import PipelineModel
 from pyspark.ml.classification import RandomForestClassificationModel
 from pyspark.ml.functions import vector_to_array
 
+import json
+import time
+
 from backend.realtime.bloom_filter import ThreatBloomFilter
 from backend.realtime.alert_writer import AlertWriter
 from backend.realtime.detection_policy import (
@@ -104,6 +128,10 @@ from backend.realtime.detection_policy import (
     load_thresholds,
     spike_severity_for,
 )
+from backend.realtime.online_learning import (
+    OnlineLearningConfig,
+    OnlineLearningPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +141,21 @@ STREAM_PORT = int(os.getenv("STREAM_PORT", "9999"))
 SPARK_MASTER = os.getenv("SPARK_MASTER", "local[*]")
 SPIKE_THRESHOLD = int(os.getenv("SPIKE_THRESHOLD", "50"))
 WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "60"))
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+# Host-side default (compose publishes MongoDB on host 27018). Inside the
+# compose network MONGO_URI is set to mongodb://mongodb:27017/, which wins.
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
 MONGO_DB = os.getenv("MONGO_DB", "threvia")
 
 # Checkpoint root. Overridable so two detectors can run side by side against the
 # same stream (e.g. an operating-point A/B) without stealing each other's files.
 CHECKPOINT_BASE = os.getenv("CHECKPOINT_BASE", "/tmp/threvia_checkpoint")
+
+# How often the detector reads new analyst verdicts from MongoDB. The online layer
+# learns from them on the driver, between micro-batches; 20 s is fast enough that a
+# verdict visibly changes the operating point within a couple of sweeps, and slow
+# enough that the read is a rounding error next to the batch itself.
+FEEDBACK_POLL_SECONDS = float(os.getenv("FEEDBACK_POLL_SECONDS", "20"))
+FEEDBACK_FETCH_LIMIT = int(os.getenv("FEEDBACK_FETCH_LIMIT", "500"))
 
 # Files consumed per micro-batch. The simulator emits 200 rows/s while one
 # 1,000-row file per 10 s trigger drains at 100 rows/s, so the default of 1 makes
@@ -130,6 +167,15 @@ MAX_FILES_PER_TRIGGER = int(os.getenv("MAX_FILES_PER_TRIGGER", "4"))
 # of them into the nominal_flows collection (0 disables). At the default 0.02
 # and ~130 rejected flows/trigger, that's ~3 docs/s of baseline traffic.
 NOMINAL_SAMPLE_RATE = float(os.getenv("NOMINAL_SAMPLE_RATE", "0.02"))
+
+# The adaptive layer is ON by default: a detector whose operating point cannot
+# follow the traffic it is watching is the failure this project is about, and
+# leaving it off by default would mean shipping the frozen-model behaviour and
+# calling it fixed.  Set ONLINE_LEARNING=off for a matched A/B against the frozen
+# model -- that comparison is the only way to show the layer earns its place.
+ONLINE_LEARNING_ENABLED = os.getenv("ONLINE_LEARNING", "on").strip().lower() not in (
+    "0", "false", "no", "off",
+)
 
 # Model paths.
 #
@@ -256,6 +302,42 @@ def _spike_batch_handler(writer: AlertWriter):
 
 # ── ML foreachBatch handler ────────────────────────────────────────────────────
 
+class FeedbackPoller:
+    """Polls MongoDB for new analyst verdicts and feeds them to the online layer.
+
+    Lives on the driver, between micro-batches, because it touches a Python object
+    (the learning policy) that only exists there.  Reading the verdicts is
+    idempotent: the policy de-duplicates by document id, so the poller does not
+    need a high-water mark to avoid double-learning a verdict.
+    """
+
+    def __init__(self, writer: AlertWriter, policy: OnlineLearningPolicy,
+                 interval: float = FEEDBACK_POLL_SECONDS,
+                 limit: int = FEEDBACK_FETCH_LIMIT):
+        self._writer = writer
+        self._policy = policy
+        self._interval = max(1.0, float(interval))
+        self._limit = int(limit)
+        self._last = 0.0
+
+    def poll(self) -> int:
+        now = time.monotonic()
+        if now - self._last < self._interval:
+            return 0
+        self._last = now
+        try:
+            rows = self._writer.fetch_recent_feedback(limit=self._limit)
+        except Exception as exc:  # noqa: BLE001 - feedback must never kill the stream
+            logger.warning("Feedback poll failed (%s) — continuing without it", exc)
+            return 0
+        if not rows:
+            return 0
+        learned = self._policy.learn_feedback(rows)
+        if learned:
+            logger.info("Learned from %d new analyst verdicts", learned)
+        return learned
+
+
 def _ml_batch_handler(
     scaler,
     rf_binary,
@@ -265,17 +347,25 @@ def _ml_batch_handler(
     rf_multi=None,
     label_map: dict[int, str] | None = None,
     nominal_sample_rate: float = 0.0,
+    learning: OnlineLearningPolicy | None = None,
+    feedback_poller: "FeedbackPoller | None" = None,
 ):
     """
     Returns a foreachBatch function for ML-based classification.
 
-    Flow: scaler → binary RF → Bot specialist → policy verdict.  A uniform
-    sample of below-threshold flows is mirrored to the nominal collection so
-    baseline traffic is visible to dashboards.
+    Flow: scaler → binary RF → (online layer) → Bot specialist → policy verdict.
+    A uniform sample of below-threshold flows is mirrored to the nominal
+    collection so baseline traffic is visible to dashboards.
 
-    The Bot specialist is *scored* for every above-threshold flow (it is a
-    narrow map, and scoring is cheap) but the policy only lets its verdict count
-    inside the low-confidence band.  See ``detection_policy`` for the rationale.
+    The Bot specialist is *scored* for every flow above the online layer's cheap
+    prefilter (a narrow map, and scoring is cheap) but the policy only lets its
+    verdict count inside the low-confidence band.  See ``detection_policy``.
+
+    ``learning``, when supplied, changes exactly three things: which score the
+    decision is made on (the residual-corrected one), where the alert threshold
+    sits (the rate-controlled one), and what is written to the learning
+    collections.  It cannot change the model, the features, or the severity
+    ladder -- see ``online_learning`` for the bounds that guarantee that.
     """
     def handler(batch_df, batch_id: int):
         # Cache first: every .count() below would otherwise re-scan and re-score
@@ -287,6 +377,10 @@ def _ml_batch_handler(
             return
 
         logger.info("Batch %d: processing %d rows", batch_id, batch_df.count())
+
+        # New analyst verdicts are consumed before the batch is scored, so a
+        # verdict applied in the dashboard is reflected in the very next sweep.
+        learned_feedback = feedback_poller.poll() if feedback_poller is not None else 0
 
         try:
             # Apply scaler
@@ -301,25 +395,79 @@ def _ml_batch_handler(
                 .drop("_prob_arr")
             )
 
-            # Filter to attacks above the policy threshold
+            # The decision point and the score it is compared against both come
+            # from the online layer.  ``effective`` is the calibrated policy with
+            # its operating point (and the matching severity rung) replaced.
+            effective = thresholds
+            if learning is not None:
+                effective = learning.apply_to_thresholds(thresholds)
+                # Every flow in the batch, not just the alerts: the budget is a
+                # fraction of scored traffic, and a pool of alerts cannot measure
+                # a rate.  This is one extra pass over an already-cached frame.
+                batch_scores = [
+                    float(r["p_attack"])
+                    for r in scored.select("p_attack").collect()
+                    if r["p_attack"] is not None
+                ]
+                record = learning.observe(
+                    batch_scores, batch_id=batch_id, learned_feedback=learned_feedback,
+                )
+                # The benign majority is the only large source of negatives the
+                # stream offers; the layer applies its own margin and drift guard.
+                learned_nominal = learning.learn_nominal_negatives(batch_scores)
+                logger.info(
+                    "Batch %d: online learning cut=%.4f (calibrated %.4f%s) "
+                    "PSI=%.3f drift=%s residual=%+.3f logits (%d updates, %d verdicts, "
+                    "%d nominal negatives)",
+                    batch_id, record["threshold"], record["calibrated_threshold"],
+                    " SATURATED" if record["budget_saturated"] else "",
+                    record["psi"], record["drift"], record["shift_mean"],
+                    record["calibrator_updates"], record["learned_feedback"],
+                    learned_nominal,
+                )
+            else:
+                record = None
+
+            def flush_learning(alert_total: int) -> None:
+                """Persist what the layer learned from this batch.
+
+                Called on both exits (including the empty-batch path): a batch with
+                no alerts is still evidence about the score distribution, and
+                dropping those batches would blind the drift monitor exactly when
+                traffic is quiet.
+                """
+                if learning is None or record is None:
+                    return
+                rec = learning.note_alerts(alert_total) or record
+                writer.write_learning_telemetry(rec)
+                writer.write_learning_state(learning.snapshot())
+                if (batch_id % max(1, learning.config.save_every_batches)) == 0:
+                    learning.save()
+
+            # Filter to the flows that could possibly clear the adaptive gate.
+            # ``prefilter_threshold`` is the loosest cut that cannot drop a row the
+            # exact (residual-corrected) test would keep, so the Bot specialist
+            # stays off rows that cannot alert without changing the answer.
+            gate = (learning.prefilter_threshold() if learning is not None
+                    else thresholds.attack_threshold)
             attacks = (
                 scored
-                .filter(F.col("p_attack") >= thresholds.attack_threshold)
+                .filter(F.col("p_attack") >= gate)
                 .withColumnRenamed("label", "gt_label")
                 .withColumnRenamed("attack_cat", "gt_cat")
             )
 
             attack_count = attacks.count()
             logger.info(
-                "Batch %d: %d/%d flows above P(attack) >= %.2f",
-                batch_id, attack_count, batch_df.count(), thresholds.attack_threshold,
+                "Batch %d: %d/%d flows above prefilter P(attack) >= %.4f (gate %.4f)",
+                batch_id, attack_count, batch_df.count(), gate, effective.attack_threshold,
             )
 
             # Mirror a sample of the REJECTED flows as nominal traffic, so the
             # benign majority of the stream is observable (radar green dots).
             if nominal_sample_rate > 0 and attack_count < batch_df.count():
                 nominal = (
-                    scored.filter(F.col("p_attack") < thresholds.attack_threshold)
+                    scored.filter(F.col("p_attack") < effective.attack_threshold)
                     .select("srcip", "dstip", "p_attack", "label", "attack_cat", "event_time")
                     .sample(withReplacement=False, fraction=nominal_sample_rate, seed=batch_id)
                     .withColumnRenamed("srcip", "src_ip")
@@ -338,6 +486,7 @@ def _ml_batch_handler(
                     )
 
             if attack_count == 0:
+                flush_learning(0)
                 batch_df.unpersist()
                 return
 
@@ -380,12 +529,25 @@ def _ml_batch_handler(
                 if label_map and rec.get("_multi_idx") is not None:
                     hint = label_map.get(int(rec["_multi_idx"]))
 
-                verdict = classify_flow(
-                    rec.get("p_attack"),
-                    rec.get("p_bot"),
-                    thresholds,
-                    attack_type_hint=hint,
-                )
+                # The decision itself.  With the online layer enabled the score is
+                # the model's raw output with a bounded residual applied and the cut
+                # is the rate-controlled one; with it disabled both are the frozen
+                # artifacts, which is the matched A/B baseline.
+                if learning is not None:
+                    # The adaptive path: the bounded residual re-ranks the score and
+                    # the rate-controlled cut decides, with the audit trail carried
+                    # by the policy itself (raw score, adapted score, cut used).
+                    verdict = learning.classify(
+                        rec.get("p_attack"), rec.get("p_bot"), thresholds,
+                        attack_type_hint=hint,
+                    )
+                else:
+                    verdict = classify_flow(
+                        rec.get("p_attack"),
+                        rec.get("p_bot"),
+                        thresholds,
+                        attack_type_hint=hint,
+                    )
                 if verdict is None:          # below threshold after all
                     continue
 
@@ -393,8 +555,20 @@ def _ml_batch_handler(
                     "src_ip":            rec.get("srcip"),
                     "dst_ip":            rec.get("dstip"),
                     "attack_type":       verdict["attack_type"],
+                    # confidence is the score the verdict was made on (adapted), so
+                    # severity and the decision stay consistent with each other.
                     "confidence":        verdict["confidence"],
                     "severity":          verdict["severity"],
+                    # Audit trail of the adaptation.  ``p_attack_raw`` is what the
+                    # model said; the difference is what the online layer added,
+                    # and ``threshold_used`` is where the cut sat for this flow.
+                    "p_attack_raw":      verdict.get("p_attack_raw"),
+                    "p_attack_adapted":  verdict.get("p_attack_adapted"),
+                    "score_shift":       verdict.get("score_shift"),
+                    "threshold_used":    verdict.get("threshold_used",
+                                                      effective.attack_threshold),
+                    "calibrated_threshold": thresholds.attack_threshold,
+                    "learning_updates":  verdict.get("learning_updates", 0),
                     "p_bot":             rec.get("p_bot"),
                     "p_bot_calibrated":  verdict["p_bot_calibrated"],
                     "bot_routed":        verdict["bot_routed"],
@@ -410,6 +584,10 @@ def _ml_batch_handler(
                     "event_time":        rec.get("event_time"),
                 })
 
+            # The realized rate counts alerts that reached the feed; a flow parked
+            # for manual review is not an alert and must not inflate the rate the
+            # budget is compared against.
+            alert_total = sum(1 for a in alerts if a.get("auto_alert", True))
             if alerts:
                 auto, review = [], []
                 for a in alerts:
@@ -429,6 +607,11 @@ def _ml_batch_handler(
                         ", ".join(sorted({a["attack_type"] for a in review})),
                     )
 
+            # The realized rate is known only now, so it is folded into the record
+            # after the gate has run; without it the dashboard would plot a budget
+            # against nothing.
+            flush_learning(alert_total)
+
         except Exception as e:
             logger.error("Batch %d ML handler error: %s", batch_id, e, exc_info=True)
         finally:
@@ -438,6 +621,27 @@ def _ml_batch_handler(
 
 
 # ── Optional model helpers ─────────────────────────────────────────────────────
+
+def _load_prime_scores(path: str) -> list[float]:
+    """Read scores used to seed the drift baseline.
+
+    Accepts either a bare JSON array of probabilities or ``{"scores": [...]}``.
+    The intended source is the calibration artifact's *benign* holdout scores, so
+    the first drift measurement compares live traffic against the population the
+    deployed cut was derived from rather than against the first live batch.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict):
+        data = data.get("scores") or []
+    out: list[float] = []
+    for value in data or []:
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
 
 def _try_load_multiclass(spark):
     """Best-effort load of the multiclass RF. Absence is not fatal."""
@@ -529,6 +733,44 @@ def run_streaming_detector() -> None:
             "MODELS_DIR=%s first.",
             thresholds.source, MODELS_BASE, SHARED_DIR, MODELS_BASE,
         )
+
+    # ── 5b. Online / continual-learning layer ────────────────────────────────
+    # The gate, the scaler and the severity ladder are all frozen artifacts derived
+    # from one corpus.  This layer is the part that keeps working when the traffic
+    # stops looking like that corpus; see backend/realtime/online_learning.py.
+    learning: OnlineLearningPolicy | None = None
+    feedback_poller: FeedbackPoller | None = None
+    if ONLINE_LEARNING_ENABLED:
+        learn_cfg = OnlineLearningConfig.from_env()
+        if not learn_cfg.state_path:
+            # Tied to the checkpoint root so a second detector (an A/B, a replay)
+            # does not inherit the first one's learned state.
+            learn_cfg.state_path = f"{CHECKPOINT_BASE}_learning.json"
+        learning = OnlineLearningPolicy.load_or_new(thresholds=thresholds, config=learn_cfg)
+        prime_path = os.getenv("ONLINE_LEARNING_PRIME")
+        if prime_path and learning.reference.source == "empty":
+            try:
+                primed = learning.prime_reference(
+                    _load_prime_scores(prime_path), source=f"prime:{Path(prime_path).name}"
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not read ONLINE_LEARNING_PRIME %s (%s)", prime_path, exc)
+            else:
+                if primed == 0:
+                    logger.warning("ONLINE_LEARNING_PRIME %s held no usable scores", prime_path)
+        lo, hi = learning.threshold_bounds()
+        logger.info(
+            "Online learning %s: cut %.4f (anchor %.4f, band %.4f-%.4f), budget %.3f, "
+            "residual cap %.2f logits, %d labelled verdicts, %d drift re-anchors, state %s",
+            "ENABLED" if learning.enabled else "disabled",
+            learning.effective_threshold(), learning.calibrated_threshold, lo, hi,
+            learning.config.target_alert_rate, learning.config.max_logit_shift,
+            learning.feedback_learned, learning.drift.reanchors, learn_cfg.state_path,
+        )
+        if learning.enabled:
+            feedback_poller = FeedbackPoller(writer, learning)
+    else:
+        logger.info("Online learning disabled (ONLINE_LEARNING=off) — frozen operating point")
 
     rf_multi = _try_load_multiclass(spark)
     label_map = _try_load_label_map(spark) if rf_multi is not None else None
@@ -623,6 +865,7 @@ def run_streaming_detector() -> None:
                 scaler, rf_binary, rf_bot, writer, thresholds,
                 rf_multi=rf_multi, label_map=label_map,
                 nominal_sample_rate=NOMINAL_SAMPLE_RATE,
+                learning=learning, feedback_poller=feedback_poller,
             )
         )
         .option("checkpointLocation", f"{CHECKPOINT_BASE}_ml")
@@ -630,8 +873,9 @@ def run_streaming_detector() -> None:
         .start()
     )
     logger.info(
-        "ML classification query started (P(attack) >= %.2f).",
-        thresholds.attack_threshold,
+        "ML classification query started (P(attack) >= %.4f%s).",
+        learning.effective_threshold() if learning else thresholds.attack_threshold,
+        ", rate-controlled" if learning else "",
     )
 
     # ── 10. Block until terminated ────────────────────────────────────────────

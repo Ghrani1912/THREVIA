@@ -38,7 +38,9 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 
 **Technical Achievements:**
 - HDFS directory structure: `/threvia/raw`, `/threvia/corpus`, `/threvia/models_clean`
-- Automated dataset upload via `hdfs-init` container
+- Dataset upload via `upload_datasets.ps1` (the old one-shot `hdfs-init`
+  container was removed: it ran at `docker compose up`, before the datasets —
+  which are not in git — had been downloaded)
 - Health check scripts for all services
 
 **Files:**
@@ -129,7 +131,8 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 - `backend/ml/advanced_eval.py` — Comprehensive evaluation
 - `documentation/FINAL_MODEL_EVALUATION.md` — Full results
 - `documentation/HONEST_EVAL_REPORT.md` — Honest metrics analysis
-- `documentation/LYCOS_LEAKAGE_ANALYSIS.md` — TEST-A investigation
+- `backend/ml/test_lycos_leakage_causal.py` + `documentation/HONEST_EVAL_REPORT.md`
+  — TEST-A investigation (there is no separate LYCOS_LEAKAGE_ANALYSIS.md)
 
 ---
 
@@ -284,7 +287,7 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 ┌─────────────────────────────────────────────────────────┐
 │                  THREVIA Platform                        │
 ├─────────────────────────────────────────────────────────┤
-│  Phase 6: Streamlit Dashboard (http://localhost:8501)  │
+│  Phase 6: SOC Dashboard (FastAPI) (localhost:8000)     │
 ├─────────────────────────────────────────────────────────┤
 │  Phase 5: Graph Analytics (NetworkX + pyvis)           │
 ├─────────────────────────────────────────────────────────┤
@@ -399,7 +402,7 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 - [x] Docker containers running (`docker compose up -d`)
 - [x] HDFS datasets uploaded and validated
 - [x] 16 GB RAM available on host
-- [x] Ports 9870, 8080, 8501, 27017 free
+- [x] Ports 9870, 8020, 8080, 7077, 8000, 27018 free
 
 ### Phase Completion ✅
 - [x] Phase 1: Foundation validated
@@ -411,7 +414,7 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 - [x] Phase 7: Integration checks passed
 
 ### Post-Deployment ✅
-- [x] Dashboard verified (http://localhost:8501)
+- [x] Dashboard verified (http://localhost:8000/dashboard)
 - [x] Real-time alerts flowing to MongoDB
 - [x] Graph visualization renders correctly
 - [x] No error logs in Docker containers
@@ -431,7 +434,7 @@ THREVIA is now **fully operational** with all 7 implementation phases complete:
 | **FR4:** Train unsupervised model | ✅ Achieved | K-Means 91.31% purity |
 | **FR5:** Real-time detection | ✅ Achieved | Spark Streaming <10s latency |
 | **FR6:** Graph analytics | ✅ Achieved | Centrality + communities |
-| **FR7:** Interactive dashboard | ✅ Achieved | Streamlit at localhost:8501 |
+| **FR7:** Interactive dashboard | ✅ Achieved | FastAPI + SOC UI at localhost:8000/dashboard |
 | **FR8:** 90% threat coverage | ✅ Achieved | DDoS/PortScan/BENIGN 99%+ |
 | **FR9:** <30s streaming latency | ✅ Achieved | 10s micro-batches |
 | **FR10:** Scalable to 100M+ flows | ✅ Achieved | HDFS + Spark architecture |
@@ -462,7 +465,7 @@ docker compose up -d
 .\run_threvia_pipeline.ps1
 ```
 
-**Dashboard:** http://localhost:8501  
+**Dashboard:** http://localhost:8000/dashboard  
 **Spark UI:** http://localhost:8080  
 **HDFS UI:** http://localhost:9870
 

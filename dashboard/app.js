@@ -55,8 +55,16 @@ async function updateThreatStream() {
                 const time = threat.created_at || threat.timestamp || 'Unknown';
                 const timeStr = new Date(time).toLocaleTimeString();
                 const srcIp = threat.src_ip || threat.source_ip || 'N/A';
-                const severity = threat.severity || 'Medium';
-                const severityClass = severity === 'Critical' ? 'text-error' : 'text-primary-container';
+                // Same palette as the scope, so a band means one colour everywhere
+                // in the UI. This used to be `Critical ? text-error :
+                // text-primary-container`, which painted High, Medium, Low and
+                // Nominal identically: four bands collapsed into two, and the
+                // list contradicted the legend sitting next to it. A contact with
+                // no verdict at all (a Bloom hit) is Ungraded, not Medium.
+                const severity = threat.severity || 'Ungraded';
+                const severityColor = RADAR_SEVERITY_COLORS[severity]
+                    || (severity === 'Low' ? RADAR_SEVERITY_COLORS.Nominal
+                                           : RADAR_SEVERITY_COLORS.Ungraded);
                 
                 let detail = '';
                 if (threat.type === 'spike_alert') {
@@ -73,9 +81,9 @@ async function updateThreatStream() {
                 }
                 
                 return `
-                    <div class="p-space-sm bg-surface-container-low border-l-2 border-error mb-space-xs hover:bg-surface-container transition-colors cursor-pointer">
+                    <div class="p-space-sm bg-surface-container-low border-l-2 mb-space-xs hover:bg-surface-container transition-colors cursor-pointer" style="border-left-color:${severityColor}">
                         <div class="flex items-center justify-between mb-space-xs">
-                            <span class="font-label-md text-label-md ${severityClass} font-bold uppercase">${severity}</span>
+                            <span class="font-label-md text-label-md font-bold uppercase" style="color:${severityColor}" title="Severity band — the same colour the scope draws">${severity}</span>
                             <span class="font-label-sm text-label-sm text-on-surface-variant">${timeStr}</span>
                         </div>
                         <div class="font-body-md text-body-md text-on-surface font-semibold">
@@ -401,10 +409,37 @@ async function updateRadarIPs() {
                 angle: (idx * 45) + (radarAngle % 360), // Spread around circle
                 distance: 60 + Math.random() * 30 // Random distance from center
             }));
+            renderContactCount(radarIPs);
         }
     } catch (error) {
         console.error('Failed to update radar:', error);
     }
+}
+
+/**
+ * The readout tile must count what the scope is actually drawing.
+ *
+ * The tile was static HTML reading "0 VECTORS" while blips were on screen, which
+ * is the same defect as a legend that names the wrong colour: a readout the user
+ * can watch contradict the display next to it. The band mix goes in the tooltip
+ * because the tile has room for a number, not for a breakdown.
+ */
+function renderContactCount(blips) {
+    const el = document.getElementById('stat-contacts');
+    if (!el) return;
+    const n = blips ? blips.length : 0;
+    el.textContent = `${n} VECTOR${n === 1 ? '' : 'S'}`;
+    if (!n) {
+        el.title = 'No contacts on the scope — the last 5-minute window held none.';
+        return;
+    }
+    const counts = {};
+    blips.forEach(b => {
+        const band = b.severity || 'Ungraded';
+        counts[band] = (counts[band] || 0) + 1;
+    });
+    const mix = Object.entries(counts).map(([band, k]) => `${k} ${band}`).join(' · ');
+    el.title = `Contacts drawn on the scope — ${mix}`;
 }
 
 function drawRadar() {
@@ -709,6 +744,12 @@ document.addEventListener('DOMContentLoaded', initSocControls);
 // ══════════════════════════════════════════════════════════════════════════════
 
 function updateForensicPanel(threat) {
+    // The analyst-verdict buttons label *this* contact, so the panel keeps a
+    // reference to the selected threat instead of re-deriving it from the DOM
+    // (and instead of labelling whichever contact happens to be newest).
+    selectedThreat = threat;
+    resetVerdictControls(threat);
+
     // Update header with source IP
     const drawerIp = document.getElementById('drawer-ip');
     if (drawerIp) {
@@ -1877,4 +1918,307 @@ document.addEventListener('DOMContentLoaded', function() {
     // Hook into global refresh interval
     setInterval(updateSpectralWaterfall, 5000);
     updateSpectralWaterfall();
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ONLINE LEARNING PANEL + ANALYST VERDICTS
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// The detector's adaptive layer reports what it is doing into MongoDB; this panel
+// renders that report and nothing else.  Two things follow, and both matter
+// because the panel is easy to mistake for a control surface:
+//
+//   * It never invents a number.  Missing state renders as an explicit gap
+//     ("no detector reporting"), not as zeroes that look like measurements.
+//   * The verdict buttons are the only writer here.  They post a label; the
+//     detector consumes it on its next poll and the effect shows up in this panel
+//     on a later sweep -- which is the honest latency of the loop.
+
+let selectedThreat = null;
+let verdictInFlight = false;
+
+// Same palette the radar uses for its severity swatches, so the panel cannot end
+// up with its own private idea of what "alerting" looks like.
+const LEARNING_COLORS = {
+    rate: RADAR_SEVERITY_COLORS.High,
+    budget: RADAR_SEVERITY_COLORS.Nominal,
+    grid: 'rgba(218, 194, 174, 0.25)',
+};
+
+function _learnSet(id, text, className) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    if (className !== undefined) el.className = className;
+}
+
+const fmtPct = (v, digits = 2) =>
+    (typeof v === 'number' && isFinite(v)) ? `${(v * 100).toFixed(digits)}%` : '--';
+
+const fmtSigned = (v, digits = 3) => {
+    if (typeof v !== 'number' || !isFinite(v)) return '--';
+    return `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`;
+};
+
+function renderLearningPanel(state) {
+    const statusEl = document.getElementById('learning-status');
+    const op = state.operating_point || {};
+    const drift = state.drift || {};
+    const cal = state.calibrator || {};
+    const fb = state.feedback || {};
+
+    if (state.source !== 'measured') {
+        if (statusEl) {
+            statusEl.textContent = 'NO DETECTOR';
+            statusEl.className = 'px-space-xs py-space-xs bg-surface-container text-outline-variant font-label-sm text-label-sm font-bold';
+        }
+        ['learn-cut', 'learn-budget', 'learn-drift', 'learn-residual', 'learn-feedback']
+            .forEach(id => _learnSet(id, '--'));
+        _learnSet('learn-note',
+            state.note || state.error ||
+            'The detector has not reported any learning state, so there is nothing to show. ' +
+            'This is an absence of telemetry, not a detector operating at zero.',
+            'text-[10px] text-on-surface-variant leading-snug border-t border-surface-container-highest pt-space-xs');
+        drawLearningSparkline([]);
+        return;
+    }
+
+    const stale = !!state.stale;
+    if (statusEl) {
+        statusEl.textContent = stale
+            ? `STALE ${Math.round(state.age_seconds || 0)}s`
+            : 'LIVE';
+        statusEl.className = stale
+            ? 'px-space-xs py-space-xs bg-primary-container/20 text-primary-container border border-primary-container/40 font-label-sm text-label-sm font-bold'
+            : 'px-space-xs py-space-xs bg-secondary/10 text-secondary border border-secondary/40 font-label-sm text-label-sm font-bold';
+    }
+
+    const cut = op.threshold, anchor = op.calibrated_threshold, delta = op.threshold_delta;
+    _learnSet('learn-cut',
+        `${(anchor ?? 0).toFixed(4)} → ${(cut ?? 0).toFixed(4)} (${fmtSigned(delta, 4)})` +
+        (op.budget_saturated ? ' · CEILING' : ''),
+        'text-on-surface font-bold');
+
+    const bounds = Array.isArray(op.bounds) ? op.bounds : [];
+    _learnSet('learn-budget',
+        `${fmtPct(op.alert_rate_ema)} / ${fmtPct(op.budget)}` +
+        (bounds.length === 2 ? ` · band ${bounds[0].toFixed(4)}–${bounds[1].toFixed(4)}` : ''),
+        op.budget_saturated ? 'text-primary-container' : 'text-on-surface');
+
+    const psi = typeof drift.psi === 'number' ? drift.psi : null;
+    const ks = typeof drift.ks === 'number' ? drift.ks : null;
+    _learnSet('learn-drift',
+        `PSI ${psi === null ? '--' : psi.toFixed(3)} · KS ${ks === null ? '--' : ks.toFixed(3)} · ` +
+        `${String(drift.verdict || '--').toUpperCase()} · ${drift.reanchors || 0} RE-ANCHORS`,
+        drift.verdict === 'stable'
+            ? 'text-secondary'
+            : (drift.verdict === 'severe' ? 'text-error' : 'text-primary-container'));
+
+    const identity = cal.identity === true;
+    _learnSet('learn-residual',
+        identity
+            ? 'identity (no labels consumed)'
+            : `${fmtSigned(cal.mean_shift)} logits mean · cap ±${(cal.max_logit_shift ?? 0).toFixed(1)} · ${cal.updates || 0} updates`,
+        identity ? 'text-on-surface-variant' : 'text-on-surface');
+
+    const recorded = state.feedback_total;
+    _learnSet('learn-feedback',
+        `${fb.learned || 0} consumed` +
+        (typeof recorded === 'number' ? ` / ${recorded} recorded` : '') +
+        ` · ${fb.nominal_negatives || 0} nominal negatives`,
+        'text-on-surface');
+
+    // One plain-English paragraph.  Everything here is a statement about what the
+    // layer did, so it is built from the state rather than from the UI's hopes.
+    const notes = [];
+    notes.push(
+        identity
+            ? 'Score residual is the identity function: with no analyst verdicts consumed, this detector decides exactly what the frozen model decides.'
+            : `Score residual re-ranks flows from ${cal.updates || 0} labels (mean ${fmtSigned(cal.mean_shift)} logits), capped at ±${(cal.max_logit_shift ?? 0).toFixed(1)}.`
+    );
+    if (op.budget_saturated) {
+        notes.push(
+            `The ${fmtPct(op.budget)} alert-rate budget is unreachable on this traffic, so the cut is pinned at the top of its band — the ladder above it is preserved on purpose.`
+        );
+    }
+    if ((drift.reanchors || 0) > 0) {
+        notes.push(
+            `⚠ The score baseline was re-anchored ${drift.reanchors}×, which means the traffic stayed different from the reference long enough to become the new reference: the model is running on a distribution it was not trained on.`
+        );
+    }
+    if (op.anchor_source) notes.push(`Cut anchored to ${op.anchor_source}.`);
+    _learnSet('learn-note', notes.join(' '),
+        'text-[10px] text-on-surface-variant leading-snug border-t border-surface-container-highest pt-space-xs');
+
+    drawLearningSparkline(Array.isArray(state.history) ? state.history : []);
+}
+
+/** Alert rate over time, against the budget it is supposed to hold. */
+function drawLearningSparkline(series) {
+    const canvas = document.getElementById('learning-canvas');
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = Math.max(160, canvas.getBoundingClientRect().width || 240);
+    const cssHeight = 34;
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    const points = series
+        .map(r => (typeof r.alert_rate === 'number' ? r.alert_rate : null))
+        .filter(v => v !== null);
+    const budget = series.length && typeof series[series.length - 1].budget === 'number'
+        ? series[series.length - 1].budget
+        : null;
+
+    ctx.strokeStyle = LEARNING_COLORS.grid;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, cssWidth - 1, cssHeight - 1);
+
+    if (!points.length) {
+        ctx.fillStyle = LEARNING_COLORS.grid;
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.fillText('no batches observed yet', 6, cssHeight / 2 + 3);
+        return;
+    }
+
+    const peak = Math.max(budget || 0, ...points, 1e-6) * 1.15;
+    const x = i => (points.length === 1 ? cssWidth - 2 : (i / (points.length - 1)) * (cssWidth - 4) + 2);
+    const y = v => cssHeight - 3 - (v / peak) * (cssHeight - 8);
+
+    if (budget !== null) {
+        ctx.strokeStyle = LEARNING_COLORS.budget;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(0, y(budget));
+        ctx.lineTo(cssWidth, y(budget));
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    ctx.strokeStyle = LEARNING_COLORS.rate;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    points.forEach((v, i) => { i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)); });
+    ctx.stroke();
+
+    canvas.title = `Alert rate per batch (${points.length} batches), dashed = ${fmtPct(budget)} budget`;
+}
+
+// A hung API must not stack requests: this panel polls faster than the other
+// views, and an unreachable MongoDB can leave a request pending for seconds. One
+// in-flight poll at a time keeps the failure mode "stale panel" rather than
+// "dozens of pending fetches".
+let learningPollInFlight = false;
+
+async function updateLearningPanel() {
+    if (learningPollInFlight) return;
+    learningPollInFlight = true;
+    try {
+        const response = await fetch(`${API_BASE}/learning/status?history=120`);
+        renderLearningPanel(await response.json());
+    } catch (error) {
+        renderLearningPanel({ source: 'unavailable', error: `API unreachable: ${error}` });
+    } finally {
+        learningPollInFlight = false;
+    }
+}
+
+/**
+ * The score a verdict refers to.
+ *
+ * The online calibrator learns in the model's *raw* score space, so label the raw
+ * score when the alert carries one.  `confidence` is the adapted score once the
+ * layer has learned something, and feeding that back would be training the layer
+ * on its own output.
+ */
+function scoreForVerdict(threat) {
+    if (!threat) return null;
+    const raw = (threat.p_attack_raw !== undefined && threat.p_attack_raw !== null)
+        ? threat.p_attack_raw
+        : threat.confidence;
+    return (typeof raw === 'number' && isFinite(raw)) ? raw : null;
+}
+
+function resetVerdictControls(threat) {
+    verdictInFlight = false;
+    const status = document.getElementById('verdict-status');
+    if (status) {
+        status.textContent = 'NO VERDICT';
+        status.className = 'text-primary font-bold';
+    }
+    const score = scoreForVerdict(threat);
+    _learnSet('verdict-hint',
+        score === null
+            ? 'This contact carries no P(attack) (a Bloom hit is a lookup, not a score), so a verdict on it cannot train the calibrator.'
+            : `Labels the raw score P(attack)=${score.toFixed(4)} from ${threat.src_ip || threat.source_ip || 'this source'}. The detector applies it on its next feedback poll.`,
+        'text-[10px] text-on-surface-variant leading-snug');
+}
+
+async function submitVerdict(verdict) {
+    if (verdictInFlight) return;
+    if (!selectedThreat) {
+        _learnSet('verdict-hint', 'Select an incident first — a verdict needs a source and a score.',
+            'text-[10px] text-on-surface-variant leading-snug');
+        return;
+    }
+    const score = scoreForVerdict(selectedThreat);
+    if (score === null) {
+        resetVerdictControls(selectedThreat);
+        return;
+    }
+
+    verdictInFlight = true;
+    try {
+        const response = await fetch(`${API_BASE}/feedback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                src_ip: selectedThreat.src_ip || selectedThreat.source_ip,
+                p_attack: score,
+                p_bot: (typeof selectedThreat.p_bot === 'number') ? selectedThreat.p_bot : undefined,
+                attack_type: selectedThreat.attack_type,
+                verdict,
+                source: 'analyst',
+            }),
+        });
+        const data = await response.json();
+        const status = document.getElementById('verdict-status');
+        if (data.ok) {
+            if (status) {
+                status.textContent = verdict === 'confirmed' ? 'CONFIRMED · QUEUED' : 'FALSE POSITIVE · QUEUED';
+                status.className = verdict === 'confirmed'
+                    ? 'text-secondary font-bold'
+                    : 'text-error font-bold';
+            }
+            _learnSet('verdict-hint',
+                'Stored. The detector consumes it within one feedback poll; the panel above updates on its next sweep.',
+                'text-[10px] text-on-surface-variant leading-snug');
+            setTimeout(updateLearningPanel, 1200);
+        } else if (status) {
+            status.textContent = 'REJECTED';
+            status.className = 'text-error font-bold';
+            _learnSet('verdict-hint', data.error || 'The API rejected this verdict.',
+                'text-[10px] text-error leading-snug');
+        }
+    } catch (error) {
+        _learnSet('verdict-hint', `Could not reach the API: ${error}`,
+            'text-[10px] text-error leading-snug');
+    } finally {
+        verdictInFlight = false;
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const confirmBtn = document.getElementById('btn-verdict-confirm');
+    const fpBtn = document.getElementById('btn-verdict-fp');
+    if (confirmBtn) confirmBtn.addEventListener('click', () => submitVerdict('confirmed'));
+    if (fpBtn) fpBtn.addEventListener('click', () => submitVerdict('false_positive'));
+
+    updateLearningPanel();
+    setInterval(updateLearningPanel, 5000);
 });

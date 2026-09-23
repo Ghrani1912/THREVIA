@@ -137,7 +137,7 @@
 <span class="text-on-surface-variant text-[10px]" id="radar-rule-nominal">--</span>
 </span>
 </div>
-<span class="text-on-surface-variant text-[10px] leading-snug border-t border-surface-container-highest pt-space-xs">RED also draws ungraded contacts &mdash; Bloom hits carry no P(attack).</span>
+<span class="text-on-surface-variant text-[10px] leading-snug border-t border-surface-container-highest pt-space-xs">RED also draws ungraded contacts &mdash; Bloom hits carry no P(attack). GREEN also covers any Low band: the sample-data path emits one, while the live ladder has no Low rung because its Medium cut is the alert threshold itself.</span>
 </div>
 </div>
 
@@ -503,6 +503,42 @@ Connecting to live stream...
 </div>
 </div>
 
+<!-- ONLINE LEARNING: what the adaptive layer is doing, and what it has learned -->
+<div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm" id="learning-panel">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-primary text-[18px]">model_training</span>
+<span class="font-label-md text-label-md uppercase font-bold text-on-surface tracking-wider">ADAPTIVE DETECTION · ONLINE LEARNING</span>
+</div>
+<span class="px-space-xs py-space-xs bg-surface-container text-on-surface-variant font-label-sm text-label-sm font-bold" id="learning-status">LINK: --</span>
+</div>
+
+<div class="bg-surface-container-lowest p-space-sm font-label-sm text-label-sm flex flex-col gap-space-xs">
+<div class="flex flex-wrap items-center justify-between gap-space-xs">
+<span class="text-on-surface-variant">OPERATING POINT</span>
+<span class="text-on-surface font-bold" id="learn-cut">--</span>
+</div>
+<div class="flex flex-wrap items-center justify-between gap-space-xs">
+<span class="text-on-surface-variant">ALERT RATE / BUDGET</span>
+<span class="text-on-surface" id="learn-budget">--</span>
+</div>
+<div class="flex flex-wrap items-center justify-between gap-space-xs">
+<span class="text-on-surface-variant">SCORE DRIFT (PSI / KS)</span>
+<span class="text-secondary" id="learn-drift">--</span>
+</div>
+<div class="flex flex-wrap items-center justify-between gap-space-xs">
+<span class="text-on-surface-variant">SCORE RESIDUAL</span>
+<span class="text-on-surface" id="learn-residual">--</span>
+</div>
+<div class="flex flex-wrap items-center justify-between gap-space-xs">
+<span class="text-on-surface-variant">HUMAN VERDICTS</span>
+<span class="text-on-surface" id="learn-feedback">--</span>
+</div>
+<div class="text-[10px] text-on-surface-variant leading-snug border-t border-surface-container-highest pt-space-xs" id="learn-note">reading learning state…</div>
+</div>
+<canvas class="w-full" height="34" id="learning-canvas"></canvas>
+</div>
+
 <!-- FORENSIC DRAWER -->
 <div class="w-full bg-surface-container-low p-space-md flex flex-col gap-space-sm" id="forensic-drawer">
 <div class="flex items-center justify-between bg-surface-container-lowest p-space-xs">
@@ -553,6 +589,21 @@ Connecting to live stream...
 0010:  0a 00 01 0a d4 31 00 50  7a 91 f0 18 00 00 00 00  .....1.Pz.......
 0020:  a0 02 72 10 c3 40 00 00  02 04 05 b4 04 02 08 0a  ..r..@..........
 0030:  3d 89 2a 11 00 00 00 00  01 03 03 07 00 00 00 00  =.*.............</pre>
+</div>
+
+<!-- Analyst verdict.  This is the ONLY input that carries a human label into the
+     online-learning layer, so it says so rather than looking like one more
+     containment action. -->
+<div class="flex flex-col gap-space-xs font-label-sm text-label-sm bg-surface-container-lowest p-space-sm">
+<div class="flex items-center justify-between text-[10px]">
+<span class="text-on-surface-variant uppercase font-semibold">ANALYST VERDICT <span class="text-outline-variant">[TRAINS THE ONLINE LAYER]</span></span>
+<span class="text-primary font-bold" id="verdict-status">NO VERDICT</span>
+</div>
+<div class="flex flex-wrap items-center gap-space-xs">
+<button class="flex-1 py-space-xs bg-secondary/20 text-secondary border border-secondary/40 font-bold uppercase hover:bg-secondary hover:text-on-secondary transition-colors" id="btn-verdict-confirm" type="button">CONFIRM THREAT</button>
+<button class="flex-1 py-space-xs bg-error-container/20 text-error border border-error/40 font-bold uppercase hover:bg-error hover:text-on-error transition-colors" id="btn-verdict-fp" type="button">MARK FALSE POSITIVE</button>
+</div>
+<div class="text-[10px] text-on-surface-variant leading-snug" id="verdict-hint">Select an incident to label it.</div>
 </div>
 
 <div class="flex items-center gap-space-xs font-label-sm text-label-sm">

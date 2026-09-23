@@ -26,20 +26,22 @@ $ErrorActionPreference = "Stop"
 # Color output functions
 function Write-PhaseHeader($phase, $name) {
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "  PHASE $phase: $name" -ForegroundColor Cyan
+    # ${phase} - "$phase:" parses as a scope/drive-qualified variable name and is
+    # a hard parse error, which stopped this whole script from running.
+    Write-Host "  PHASE ${phase}: $name" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
 }
 
 function Write-Success($msg) {
-    Write-Host "âœ… $msg" -ForegroundColor Green
+    Write-Host "[OK]   $msg" -ForegroundColor Green
 }
 
 function Write-Info($msg) {
-    Write-Host "â„¹ï¸  $msg" -ForegroundColor Yellow
+    Write-Host "[INFO] $msg" -ForegroundColor Yellow
 }
 
 function Write-Error($msg) {
-    Write-Host "âŒ $msg" -ForegroundColor Red
+    Write-Host "[ERR]  $msg" -ForegroundColor Red
 }
 
 # Check datasets first
@@ -47,7 +49,7 @@ Write-Info "Checking datasets..."
 if (-not (Test-Path "backend/data/LYCSOS/LycoS-Unicas-IDS2018.csv")) {
     Write-Error "Required datasets missing!"
     Write-Host "`nDatasets are NOT included in the repository." -ForegroundColor Yellow
-    Write-Host "Please download them first: See DATA_SETUP_GUIDE.md" -ForegroundColor Yellow
+    Write-Host "Please download them first: See documentation/DATA_SETUP_GUIDE.md" -ForegroundColor Yellow
     Write-Host "`nRun this to check dataset status:" -ForegroundColor Gray
     Write-Host "  .\verify_datasets.ps1`n" -ForegroundColor Gray
     exit 1
@@ -58,9 +60,22 @@ Write-Info "Checking Docker containers..."
 $containers = docker ps --format "{{.Names}}" | Select-String "threvia"
 if ($containers.Count -lt 4) {
     Write-Error "THREVIA containers not running. Start with: docker compose up -d"
+    Write-Host "  (infra only - add --profile phase4 for the simulator + detector)" -ForegroundColor Gray
     exit 1
 }
 Write-Success "Docker containers running"
+
+# Host-side steps below (bloom_filter.py, run_phase4.py, run_phase5.py,
+# populate_mongo.py) run on the HOST and need pymongo / pybloom-live / pyspark.
+# Prefer ./.venv when it exists so a fresh machine does not silently depend on
+# whatever happens to be installed globally. Create it once with .\setup_env.ps1
+if (Test-Path ".venv/Scripts/Activate.ps1") {
+    & ".venv/Scripts/Activate.ps1"
+    Write-Info "Using host environment: .venv"
+} else {
+    Write-Info "No .venv found - host steps will use the global Python."
+    Write-Host "  Create it once with:  .\setup_env.ps1" -ForegroundColor Gray
+}
 
 # ============================================================================
 # PHASE 1: FOUNDATION
@@ -68,6 +83,13 @@ Write-Success "Docker containers running"
 if (1 -in $Phases -and -not $SkipPhase1) {
     Write-PhaseHeader 1 "FOUNDATION"
     
+    # Phase 1 validates /threvia/raw, so put the files there first. The upload
+    # is idempotent and skips anything already in HDFS, so it is cheap to repeat.
+    # (The old compose stack did this in a one-shot hdfs-init container, which
+    # could only ever run before the datasets were downloaded.)
+    Write-Info "Uploading raw datasets to HDFS (skipping any already there)..."
+    & "$PSScriptRoot/upload_datasets.ps1"
+
     Write-Info "Validating HDFS dataset upload..."
     docker exec threvia-spark-master python3 /workspace/backend/ingestion/validate_hdfs.py
     
@@ -244,11 +266,12 @@ if (6 -in $Phases) {
     Start-Sleep -Seconds 3
     
     # Check if MongoDB has data
-    $mongoCheck = docker exec threvia-mongo mongosh threvia --quiet --eval "db.security_events.countDocuments()"
+    $countCmd = 'const c=["security_events","ml_alerts","stream_alerts","bloom_hits","nominal_flows"];let n=0;c.forEach(x=>n+=db.getCollection(x).countDocuments({}));n'
+    $mongoCheck = docker exec threvia-mongodb mongosh threvia --quiet --eval $countCmd
     
     if ($mongoCheck -eq "0" -or $null -eq $mongoCheck) {
         Write-Info "MongoDB empty - populating with sample data..."
-        python backend/realtime/stream_simulator.py --quick-populate
+        python backend/realtime/populate_mongo.py
     }
     
     Write-Success "`nDashboard ready!"
@@ -309,7 +332,7 @@ if (7 -in $Phases) {
     
     if ($allPassed) {
         Write-Success "`nPhase 7 complete: All integration checks passed"
-        Write-Success "`nðŸŽ‰ THREVIA PIPELINE COMPLETE! ðŸŽ‰"
+        Write-Success "`nTHREVIA PIPELINE COMPLETE!"
         Write-Info "`nNext steps:"
         Write-Info "  1. View dashboard: http://localhost:8000/dashboard"
         Write-Info "  2. API docs: http://localhost:8000/docs"
@@ -329,17 +352,17 @@ Write-Host "  PIPELINE EXECUTION COMPLETE" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
 Write-Info "Phase Status:"
-Write-Success "  Phase 1: Foundation âœ…"
-Write-Success "  Phase 2: Batch Processing âœ…"
-Write-Success "  Phase 3: Machine Learning âœ…"
-if (4 -in $Phases) { Write-Success "  Phase 4: Real-Time Layer âœ…" }
-if (5 -in $Phases) { Write-Success "  Phase 5: Graph Analysis âœ…" }
-if (6 -in $Phases) { Write-Success "  Phase 6: Dashboard âœ…" }
-if (7 -in $Phases) { Write-Success "  Phase 7: Integration âœ…" }
+Write-Success "  Phase 1: Foundation"
+Write-Success "  Phase 2: Batch Processing"
+Write-Success "  Phase 3: Machine Learning"
+if (4 -in $Phases) { Write-Success "  Phase 4: Real-Time Layer" }
+if (5 -in $Phases) { Write-Success "  Phase 5: Graph Analysis" }
+if (6 -in $Phases) { Write-Success "  Phase 6: Dashboard" }
+if (7 -in $Phases) { Write-Success "  Phase 7: Integration" }
 
 Write-Info "`nDocumentation:"
 Write-Info "  - Project Status: documentation/PROJECT_STATUS_SUMMARY.md"
 Write-Info "  - Phase 3 Evaluation: documentation/FINAL_MODEL_EVALUATION.md"
 Write-Info "  - PRD: documentation/THREVIA_PRD.md"
 
-Write-Success "`nâœ¨ THREVIA is ready for demonstration! âœ¨"
+Write-Success "`nTHREVIA is ready for demonstration!"

@@ -15,7 +15,9 @@ Options:
   --output PATH  PyVis HTML output path (default backend/graph/graph_export.html)
 
 Environment variables:
-  MONGO_URI      MongoDB connection string (default mongodb://localhost:27017/)
+  MONGO_URI      MongoDB connection string (default mongodb://localhost:27018/,
+                 the host port docker-compose publishes; containers use
+                 mongodb://mongodb:27017/)
   MONGO_DB       database name (default threvia)
 
 Usage examples:

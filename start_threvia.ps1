@@ -23,13 +23,29 @@ if (-not $dockerRunning) {
 
 # Step 2: Check if MongoDB has data
 Write-Host "`n[2/3] Checking MongoDB..." -ForegroundColor Yellow
+
+# The populator runs on the host against the published Mongo port, so it needs
+# the API venv (pymongo). Create it here - step 2 can be the first thing that
+# needs it, and the venv used to be created later, in step 3.
+if (-not (Test-Path "backend/api/.venv")) {
+    Write-Host "Creating Python virtual environment..." -ForegroundColor Yellow
+    python -m venv backend/api/.venv
+    & backend/api/.venv/Scripts/Activate.ps1
+    pip install -q -r backend/api/requirements.txt
+}
+
 try {
-    $count = docker exec threvia-mongo mongosh threvia --quiet --eval 'db.security_events.countDocuments()' 2>$null
-    if ($count -and $count -gt 0) {
-        Write-Host "MongoDB has $count threat events" -ForegroundColor Green
+    # Count every collection the dashboard reads, not just security_events:
+    # the detector writes ml_alerts/stream_alerts, so a populated
+    # security_events alone does not mean the dashboard has anything to show.
+    $countCmd = 'const c=["security_events","ml_alerts","stream_alerts","bloom_hits","nominal_flows"];let n=0;c.forEach(x=>n+=db.getCollection(x).countDocuments({}));n'
+    $count = docker exec threvia-mongodb mongosh threvia --quiet --eval $countCmd 2>$null
+    if ($count -and [int]$count -gt 0) {
+        Write-Host "MongoDB has $count threat documents" -ForegroundColor Green
     } else {
         Write-Host "MongoDB is empty. Populating with sample data..." -ForegroundColor Yellow
-        python backend/realtime/stream_simulator.py --quick-populate
+        & backend/api/.venv/Scripts/Activate.ps1
+        python backend/realtime/populate_mongo.py
     }
 } catch {
     Write-Host "Warning: Could not check MongoDB (container may still be starting)" -ForegroundColor Yellow

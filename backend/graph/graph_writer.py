@@ -42,7 +42,9 @@ from pymongo import MongoClient, ASCENDING, errors
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+# Host-side default — see the note in backend/realtime/alert_writer.py.
+# docker-compose publishes MongoDB on host 27018.
+_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
 _DB_NAME   = os.getenv("MONGO_DB", "threvia")
 
 _COL_NODES  = "graph_nodes"

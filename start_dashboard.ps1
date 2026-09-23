@@ -75,10 +75,12 @@ if (-not (Test-Path "backend/api/.venv")) {
     Write-Success "Python virtual environment exists"
 }
 
-# Check if MongoDB has data
+# Check if MongoDB has data. Count across every collection the dashboard draws
+# from, not just security_events: the detector writes ml_alerts/stream_alerts,
+# so a populated security_events alone does not mean the dashboard has anything.
 Write-Info "Checking MongoDB data..."
 try {
-    $evalCmd = 'db.security_events.countDocuments()'
+    $evalCmd = 'const c=["security_events","ml_alerts","stream_alerts","bloom_hits","nominal_flows"];let n=0;c.forEach(x=>n+=db.getCollection(x).countDocuments({}));n'
     $mongoCheck = docker exec threvia-mongodb mongosh threvia --quiet --eval $evalCmd 2>$null
     $threatCount = [int]$mongoCheck
     
@@ -88,7 +90,7 @@ try {
         python backend/realtime/populate_mongo.py
         Write-Success "Sample data populated"
     } else {
-        Write-Success "MongoDB has $threatCount security events"
+        Write-Success "MongoDB has $threatCount threat documents"
     }
 } catch {
     Write-Info "Could not check MongoDB status (might not be running yet)"

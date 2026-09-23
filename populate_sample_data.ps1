@@ -35,7 +35,7 @@ Write-Success "MongoDB container is running"
 # Check current document count
 Write-Info "Checking current database status..."
 try {
-    $evalCmd = 'db.security_events.countDocuments()'
+    $evalCmd = 'const c=["security_events","ml_alerts","stream_alerts","bloom_hits","nominal_flows"];let n=0;c.forEach(x=>n+=db.getCollection(x).countDocuments({}));n'
     $currentCount = docker exec threvia-mongodb mongosh threvia --quiet --eval $evalCmd 2>$null
     $count = [int]$currentCount
     Write-Info "Current documents in database: $count"
@@ -69,9 +69,9 @@ if (-not (Test-Path "backend/api/.venv")) {
 # Activate virtual environment
 & backend/api/.venv/Scripts/Activate.ps1
 
-# Check if stream_simulator.py exists
-if (-not (Test-Path "backend/realtime/stream_simulator.py")) {
-    Write-Error "stream_simulator.py not found at backend/realtime/"
+# Check the populator we are actually about to run exists.
+if (-not (Test-Path "backend/realtime/populate_mongo.py")) {
+    Write-Error "populate_mongo.py not found at backend/realtime/"
     exit 1
 }
 

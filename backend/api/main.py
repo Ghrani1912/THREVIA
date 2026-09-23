@@ -3,7 +3,7 @@ THREVIA API Server
 FastAPI backend to serve real-time threat data to the SOC dashboard
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,20 @@ except ImportError as _exc:  # pragma: no cover - defensive
     _POLICY_IMPORT_ERROR = str(_exc)
 else:
     _POLICY_IMPORT_ERROR = None
+
+# The feedback endpoint writes into the online-learning layer's label store. The
+# document shape (and the polarity vocabulary) belong to the modules that consume
+# them, so the API imports both rather than restating a second copy of either.
+try:
+    from backend.realtime.alert_writer import AlertWriter
+    from backend.realtime.online_learning import LEARNING_STATE_KEY, verdict_label
+except ImportError as _exc:  # pragma: no cover - defensive
+    AlertWriter = None
+    verdict_label = None
+    LEARNING_STATE_KEY = "policy"
+    _LEARNING_IMPORT_ERROR = str(_exc)
+else:
+    _LEARNING_IMPORT_ERROR = None
 
 # Spectral-overlay sample grid. Stdlib-only, so this import cannot fail on the
 # API's dependency set; see backend/api/bucket_grid.py for why the granularity
@@ -120,7 +134,10 @@ async def root():
 async def get_realtime_counts():
     """Fresh counts - bypasses all caching"""
     from pymongo import MongoClient
-    fresh_client = MongoClient("mongodb://localhost:27017/")
+    # A separate short-lived client (deliberately not the shared one) but the
+    # same URI: this endpoint runs on the host, where MongoDB is published on
+    # 27018. A hardcoded 27017 here reported zeros on every compose setup.
+    fresh_client = MongoClient(MONGO_URI)
     fresh_db = fresh_client["threvia"]
     
     try:
@@ -822,6 +839,163 @@ async def get_model_performance():
     return metrics
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ONLINE LEARNING
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Beyond this age the state document describes a detector that is not running, and
+# the dashboard says so instead of plotting a stale cut as if it were live.
+LEARNING_STALE_SECONDS = float(os.getenv("LEARNING_STALE_SECONDS", "120"))
+
+
+def _seconds_since(moment) -> float | None:
+    """Age in seconds of a Mongo datetime (naive UTC) or ISO string, else None."""
+    if moment is None:
+        return None
+    if isinstance(moment, str):
+        try:
+            moment = datetime.fromisoformat(moment.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(moment, datetime):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds()
+
+
+@app.get("/api/v1/learning/status")
+async def get_learning_status(history: int = 60):
+    """What the online-learning layer is doing, and what it has learned.
+
+    Reads the state document the detector upserts (``learning_state``) plus the
+    per-batch telemetry series, because the detector runs in a different process --
+    its checkpoint file is not reachable from here.
+
+    ``source: "unavailable"`` means no detector has ever reported state; it is an
+    explicit gap, not a zeroed-out panel.  ``stale: true`` means the last report is
+    older than the staleness window, so the numbers describe a detector that has
+    stopped rather than one that is merely idle.
+
+    Uses a short server-selection timeout rather than the driver default: this
+    endpoint is polled every few seconds by the dashboard, and the default 30 s
+    wait turns an unreachable MongoDB into a stack of pending requests instead of
+    one honest "unavailable".
+    """
+    fresh = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)["threvia"]
+    try:
+        state = fresh["learning_state"].find_one({"key": LEARNING_STATE_KEY}, {"_id": 0})
+        series = list(
+            fresh["learning_telemetry"]
+            .find({}, {"_id": 0})
+            .sort("created_at", DESCENDING)
+            .limit(max(1, min(int(history), 500)))
+        )
+        verdicts = {
+            str(d["_id"]): d["count"]
+            for d in fresh["feedback"].aggregate(
+                [{"$group": {"_id": "$verdict", "count": {"$sum": 1}}},
+                 {"$sort": {"count": -1}}]
+            )
+        }
+    except Exception as exc:  # a Mongo outage should not 500 the dashboard
+        return {"source": "unavailable", "error": str(exc)}
+    finally:
+        fresh.client.close()
+
+    # Oldest-first for plotting: a time series drawn right-to-left is a chart whose
+    # x axis means the opposite of what it looks like.
+    series.reverse()
+
+    if not state:
+        return {
+            "source": "unavailable",
+            "note": (
+                "No detector has reported learning state. Start the streaming "
+                "detector (backend/realtime/streaming_detector.py), or set "
+                "ONLINE_LEARNING=off to run the frozen operating point deliberately."
+            ),
+            "history": series,
+            "feedback_recorded": verdicts,
+        }
+
+    age = _seconds_since(state.get("updated_at") or state.get("saved_at"))
+    state["source"] = "measured"
+    state["age_seconds"] = age
+    state["stale"] = age is not None and age > LEARNING_STALE_SECONDS
+    state["history"] = series
+    state["feedback_recorded"] = verdicts
+    state["feedback_total"] = int(sum(verdicts.values()))
+    return state
+
+
+@app.post("/api/v1/feedback")
+async def submit_feedback(payload: Dict[str, Any] = Body(...)):
+    """Record an analyst verdict on an alert; the only source of human labels.
+
+    Body: ``{src_ip, p_attack, verdict, p_bot?, attack_type?, notes?}``, where
+    ``verdict`` is one of the polarities the online layer understands
+    (``confirmed`` / ``false_positive`` and their synonyms).  Unusable verdicts are
+    rejected rather than stored as an ambiguous row the learner would have to guess
+    at, and a verdict with no score is rejected because it cannot teach a
+    calibrator anything.
+    """
+    if AlertWriter is None or verdict_label is None:
+        return {"ok": False, "error": f"feedback store unavailable: {_LEARNING_IMPORT_ERROR}"}
+
+    verdict = payload.get("verdict")
+    label = verdict_label(verdict)
+    if label is None:
+        return {"ok": False, "error": f"unusable verdict {verdict!r}"}
+
+    p_attack = payload.get("p_attack")
+    if p_attack is None:
+        return {"ok": False, "error": "p_attack is required (the score the verdict is about)"}
+    try:
+        p_attack = float(p_attack)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": f"p_attack must be numeric, got {payload.get('p_attack')!r}"}
+    if not 0.0 <= p_attack <= 1.0:
+        return {"ok": False, "error": "p_attack must be in [0, 1]"}
+
+    doc = {
+        "src_ip": payload.get("src_ip"),
+        "p_attack": p_attack,
+        "verdict": str(verdict),
+        "source": payload.get("source") or "analyst",
+        "attack_type": payload.get("attack_type"),
+        "alert_id": payload.get("alert_id"),
+        "notes": payload.get("notes"),
+    }
+    for optional in ("p_bot", "threshold_used"):
+        value = payload.get(optional)
+        if value is None:
+            continue
+        try:
+            doc[optional] = float(value)
+        except (TypeError, ValueError):
+            pass
+
+    writer = AlertWriter(mongo_uri=MONGO_URI)
+    try:
+        inserted = writer.write_feedback(doc)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not store verdict: {exc}"}
+    finally:
+        writer.close()
+
+    return {
+        "ok": True,
+        "id": inserted,
+        "label": label,
+        "note": (
+            "Consumed by the streaming detector's online-learning layer on its next "
+            "feedback poll; it re-ranks the score band this verdict belongs to, "
+            "bounded by the residual cap."
+        ),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────────
 # WEBSOCKET FOR REAL-TIME UPDATES
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

@@ -224,7 +224,10 @@ Add to `DATA_SETUP_GUIDE.md`:
 ### Optional: Pre-Trained Models
 
 Download pre-trained models to skip 30 minutes of training:
-- [Download threvia_pretrained_models.zip](YOUR_LINK_HERE) (2.5 GB)
+- Pre-trained models are **not distributed as an archive** — they are produced by
+  the pipeline (Phase 3) and stored in HDFS. On a machine that has never run it,
+  run `.\run_threvia_pipeline.ps1` (or copy the `models_clean_v3` HDFS directory
+  across).
 
 After downloading:
 ```powershell
@@ -291,27 +294,35 @@ docker exec threvia-namenode hdfs dfs -put hdfs_export/models_clean/* /threvia/m
 
 ---
 
-## Alternative: Use Sample Data (Quick Demo)
+## Alternative: Dashboard-Only Demo (no datasets)
 
-If you **only want to test the pipeline** without full datasets:
-
-### Create Tiny Sample CSVs
+Phases 1–3 (validation, corpus merge, training) **cannot** be run without the real
+datasets: there is no sample-CSV generator in this repository, and the batch
+pipeline reads its sources from HDFS. If all you want is to *see the dashboard
+working*, you can skip the pipeline entirely:
 
 ```powershell
-# Run sample data generator (creates small test files)
-python backend/ingestion/create_sample_data.py
+.\setup_env.ps1              # host Python environment
+docker compose up -d         # MongoDB is the only service this needs
+.\populate_sample_data.ps1   # synthetic security events into MongoDB
+.\start_dashboard.ps1        # serve the UI at http://localhost:8000/dashboard
 ```
 
-This creates:
-- `backend/data/sample/sample_train.csv` (10K rows)
-- `backend/data/sample/sample_test.csv` (1K rows)
+This inserts clearly-synthetic events (`populate_mongo.py`, 200 documents across
+every severity band) so the radar, telemetry stream and panels have content.
 
-**Limitations:**
-- Won't achieve published accuracy (too small)
-- Good for testing code, not for real evaluation
-- Models will be undertrained
+For *real* alerts rather than synthetic ones, run the streaming stack instead —
+it replays the CIC-IDS-2017 Friday corpus, so it still needs the datasets
+uploaded:
 
-**Use this only for development/testing, not production.**
+```powershell
+docker compose --profile phase4 up -d
+```
+
+**Limitations of the synthetic path:** none of the ML metrics apply to it, the
+numbers in the dashboard are not produced by the trained models, and the sample
+events carry no real network behaviour. Use it to demo the UI, not to evaluate
+detection.
 
 ---
 
@@ -424,12 +435,12 @@ After downloading datasets:
 1. **Verify files exist** (see Verification section above)
 2. **Run pipeline:** `.\run_threvia_pipeline.ps1`
 3. **Wait 30-40 minutes** (automatic corpus building + training)
-4. **Access dashboard:** http://localhost:8501
+4. **Access dashboard:** http://localhost:8000/dashboard
 
-**See [QUICKSTART.md](QUICKSTART.md) for deployment instructions.**
+**See [../QUICK_START.md](../QUICK_START.md) for the run instructions.**
 
 ---
 
-**Questions?** See [DEPLOYMENT_GUIDE.md](documentation/DEPLOYMENT_GUIDE.md) troubleshooting section.
+**Questions?** See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) troubleshooting section.
 
 **Last Updated:** September 12, 2026

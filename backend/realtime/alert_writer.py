@@ -12,8 +12,19 @@ Collections written:
                              ``aggregate_ml_alerts``.  Raw per-flow input is
                              still accepted; the collapse keeps the collection
                              proportional to incidents rather than to packets.
+  - threvia.feedback       : analyst verdicts on alerts (confirmed /
+                             false_positive).  The ONLY source of human labels
+                             for the online-learning layer, and deliberately not
+                             TTL-expired: it is training data, and a verdict is
+                             as valid a year later as the day it was given.
+  - threvia.learning_telemetry : one small document per streaming batch from
+                             ``online_learning.OnlineLearningPolicy`` -- what the
+                             adaptive layer did and why.  TTL-expired.
+  - threvia.learning_state : the current learning state, upserted (one document,
+                             ``key='policy'``) so a dashboard can read it without
+                             reaching into the detector's filesystem.
 
-All collections are time-indexed for efficient dashboard queries.
+Alert collections are time-indexed for efficient dashboard queries.
 
 Dependencies: pymongo
 """
@@ -30,19 +41,32 @@ from pymongo import MongoClient, ASCENDING, errors
 logger = logging.getLogger(__name__)
 
 # ── Config (override via environment variables) ─────────────────────────────
-_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+# Host-side default. docker-compose publishes MongoDB on host 27018 (container
+# 27017), so anything launched from the host — the API venv, populate_mongo.py,
+# run_phase5.py — must default there. The detector and the API both pass an
+# explicit uri, and the containers get MONGO_URI from compose, so this default
+# only governs host-run callers.
+_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27018/")
 _DB_NAME   = os.getenv("MONGO_DB", "threvia")
 
 _COL_ALERTS = "stream_alerts"
 _COL_BLOOM  = "bloom_hits"
 _COL_ML     = "ml_alerts"
 _COL_NOMINAL = "nominal_flows"
+_COL_FEEDBACK = "feedback"
+_COL_LEARNING = "learning_telemetry"
+_COL_LEARNING_STATE = "learning_state"
+_LEARNING_STATE_KEY = "policy"
 
 # Retention. Alert and nominal collections expire this many hours after
 # creation. At the observed ~20 docs/s this caps ml_alerts near ~1.2M docs
 # regardless of uptime; tune via env without touching code.
 DEFAULT_TTL_HOURS = 72.0
 TTL_HOURS = float(os.getenv("ALERT_TTL_HOURS", str(DEFAULT_TTL_HOURS)))
+
+# Learning telemetry is a slower-moving diagnostic than the alerts it describes --
+# a drift trend over a week is the useful view -- so it outlives them.
+LEARNING_TTL_HOURS = float(os.getenv("LEARNING_TTL_HOURS", "168"))
 
 # Collapse per-flow ML alerts into one document per (src_ip, attack_type,
 # severity).  Alert *volume* is what an analyst actually pays for, and a model
@@ -307,6 +331,90 @@ class AlertWriter:
         logger.info("ML alerts inserted: %d", len(result.inserted_ids))
         return len(result.inserted_ids)
 
+    def write_learning_telemetry(self, record: dict) -> str:
+        """Persist one online-learning telemetry record (one streaming batch).
+
+        Small and append-only, one document per batch, so the drift history the
+        dashboard plots is a plain time-series read rather than a reconstruction.
+        """
+        if not record:
+            return ""
+        doc = dict(record)
+        doc.setdefault("type", "learning_telemetry")
+        doc.setdefault("created_at", datetime.now(timezone.utc))
+        result = self._col(_COL_LEARNING).insert_one(doc)
+        return str(result.inserted_id)
+
+    def write_learning_state(self, state: dict) -> bool:
+        """Upsert the current online-learning state (one document).
+
+        The detector also checkpoints its full state to a local file; this copy
+        exists because the API that serves the dashboard runs in a different
+        process (and, in this deployment, a different container) than the Spark
+        driver, so a file path on the driver is not readable from the dashboard.
+        Without it the learning panel could only show history, never current
+        weights.
+        """
+        if not state:
+            return False
+        doc = dict(state)
+        doc.setdefault("type", "learning_state")
+        doc["key"] = _LEARNING_STATE_KEY
+        doc["updated_at"] = datetime.now(timezone.utc)
+        self._col(_COL_LEARNING_STATE).replace_one(
+            {"key": _LEARNING_STATE_KEY}, doc, upsert=True
+        )
+        return True
+
+    def write_feedback(self, verdict: dict) -> str:
+        """Record an analyst verdict on an alert.
+
+        Expected keys: ``src_ip``, ``p_attack`` and ``verdict`` (one of the
+        polarities ``online_learning.verdict_label`` understands); ``p_bot``,
+        ``attack_type``, ``alert_id`` and ``notes`` are carried through when
+        present.  Returns the inserted id as a string.
+        """
+        doc = dict(verdict)
+        doc.setdefault("type", "feedback")
+        doc.setdefault("created_at", datetime.now(timezone.utc))
+        result = self._col(_COL_FEEDBACK).insert_one(doc)
+        logger.info(
+            "Feedback recorded: %s verdict=%s p_attack=%s",
+            doc.get("src_ip"), doc.get("verdict"), doc.get("p_attack"),
+        )
+        return str(result.inserted_id)
+
+    def fetch_recent_feedback(self, limit: int = 500, since=None) -> list[dict]:
+        """Return recent analyst verdicts, oldest first.
+
+        Ordering is oldest-first so a consumer that keeps a high-water mark sees
+        the verdicts in the order they were given -- and the consumer here
+        (``OnlineLearningPolicy.learn_feedback``) also de-duplicates by ``_id``,
+        so re-reading an overlapping window is harmless.
+        """
+        query: dict = {}
+        if since is not None:
+            query["created_at"] = {"$gte": since}
+        cursor = (
+            self._col(_COL_FEEDBACK)
+            .find(query)
+            .sort("created_at", ASCENDING)
+            .limit(limit)
+        )
+        out = []
+        for doc in cursor:
+            doc["_id"] = str(doc.get("_id"))
+            out.append(doc)
+        return out
+
+    def count_feedback(self) -> dict[str, int]:
+        """Count recorded verdicts by verdict string."""
+        pipeline = [
+            {"$group": {"_id": "$verdict", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+        return {str(d["_id"]): d["count"] for d in self._col(_COL_FEEDBACK).aggregate(pipeline)}
+
     def write_manual_review_bulk(self, alerts: list[dict]) -> int:
         """
         Bulk-insert flows routed to manual review instead of auto-flagging.
@@ -460,6 +568,16 @@ class AlertWriter:
             self._db[_COL_NOMINAL].create_index(
                 [("src_ip", ASCENDING)], background=True
             )
+            # Learning telemetry is read as a time series, feedback as a queue.
+            self._db[_COL_LEARNING].create_index(
+                [("created_at", ASCENDING)], background=True
+            )
+            self._db[_COL_FEEDBACK].create_index(
+                [("created_at", ASCENDING)], background=True
+            )
+            self._db[_COL_FEEDBACK].create_index(
+                [("verdict", ASCENDING)], background=True
+            )
             self._ensure_ttls()
         except errors.PyMongoError as exc:
             logger.warning("Index creation warning: %s", exc)
@@ -483,6 +601,13 @@ class AlertWriter:
             _COL_ML: TTL_HOURS,
             _COL_NOMINAL: TTL_HOURS,
             "manual_review": TTL_HOURS,
+            _COL_LEARNING: LEARNING_TTL_HOURS,
+            # NOTE: `feedback` and `learning_state` are deliberately absent.
+            # Expiring a verdict would silently shrink the online layer's only
+            # human-labelled training set, and the current state must not expire
+            # at all -- an absent state document reads as "the detector never
+            # learned anything", which is a different claim from "no detector is
+            # running".
         }
         for name, hours in ttl_specs.items():
             try:
